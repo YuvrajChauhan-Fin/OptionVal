@@ -1,589 +1,699 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  LineChart, Line, AreaChart, Area, BarChart, Bar,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ReferenceLine, ResponsiveContainer, ScatterChart, Scatter
+  LineChart, Line, AreaChart, Area, ScatterChart, Scatter,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
+  Legend, ReferenceLine, ResponsiveContainer, Cell
 } from "recharts";
 
 /* ============================================================
-   BLACK-SCHOLES ENGINE — Pure JS implementation
-   Mirrors the Python engine exactly
+   CONSTANTS & THEME
    ============================================================ */
+const API = "http://localhost:8000";
 
-function erf(x) {
-  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
-  const sign = x < 0 ? -1 : 1;
-  x = Math.abs(x);
-  const t = 1.0/(1.0+p*x);
-  const y = 1.0-((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
-  return sign*y;
-}
-
-function normCDF(x) { return 0.5*(1+erf(x/Math.sqrt(2))); }
-function normPDF(x) { return Math.exp(-0.5*x*x)/Math.sqrt(2*Math.PI); }
-
-function bsD1D2(S,K,T,r,sigma,q=0) {
-  const sqrtT = Math.sqrt(T);
-  const d1 = (Math.log(S/K)+(r-q+0.5*sigma*sigma)*T)/(sigma*sqrtT);
-  const d2 = d1 - sigma*sqrtT;
-  return {d1,d2};
-}
-
-function bsPrice(S,K,T,r,sigma,q=0,type='call') {
-  if(T<=0) return Math.max(type==='call'?S-K:K-S, 0);
-  const {d1,d2} = bsD1D2(S,K,T,r,sigma,q);
-  const expQ = Math.exp(-q*T), expR = Math.exp(-r*T);
-  if(type==='call') return S*expQ*normCDF(d1)-K*expR*normCDF(d2);
-  return K*expR*normCDF(-d2)-S*expQ*normCDF(-d1);
-}
-
-function bsGreeks(S,K,T,r,sigma,q=0,type='call') {
-  if(T<=0.0001) return {delta:type==='call'?(S>K?1:0):(S<K?-1:0),gamma:0,vega:0,theta:0,rho:0};
-  const {d1,d2} = bsD1D2(S,K,T,r,sigma,q);
-  const sqrtT=Math.sqrt(T), expQ=Math.exp(-q*T), expR=Math.exp(-r*T);
-  const nd1=normPDF(d1);
-  const delta = type==='call' ? expQ*normCDF(d1) : expQ*(normCDF(d1)-1);
-  const gamma = expQ*nd1/(S*sigma*sqrtT);
-  const vega  = S*expQ*nd1*sqrtT/100;
-  const t1    = -(S*expQ*nd1*sigma)/(2*sqrtT);
-  const t2    = type==='call'
-    ? q*S*expQ*normCDF(d1)-r*K*expR*normCDF(d2)
-    : -q*S*expQ*normCDF(-d1)+r*K*expR*normCDF(-d2);
-  const theta = (t1+t2)/365;
-  const rho   = type==='call'
-    ? K*T*expR*normCDF(d2)/100
-    : -K*T*expR*normCDF(-d2)/100;
-  return {delta,gamma,vega,theta,rho};
-}
-
-/* ── Binomial Tree (CRR) ─────────────────────────────────── */
-function binomialPrice(S,K,T,r,sigma,q=0,type='call',steps=150,style='european') {
-  const dt=T/steps, u=Math.exp(sigma*Math.sqrt(dt)), d=1/u;
-  const disc=Math.exp(-r*dt), p=(Math.exp((r-q)*dt)-d)/(u-d);
-  let V=[];
-  for(let j=0;j<=steps;j++) {
-    const St=S*Math.pow(u,j)*Math.pow(d,steps-j);
-    V.push(Math.max(type==='call'?St-K:K-St, 0));
-  }
-  let V2,V1;
-  for(let i=steps-1;i>=0;i--) {
-    const newV=[];
-    for(let j=0;j<=i;j++) {
-      let val=disc*(p*V[j+1]+(1-p)*V[j]);
-      if(style==='american') {
-        const St=S*Math.pow(u,j)*Math.pow(d,i-j);
-        val=Math.max(val,type==='call'?Math.max(St-K,0):Math.max(K-St,0));
-      }
-      newV.push(val);
-    }
-    if(i===2) V2=[...newV];
-    if(i===1) V1=[...newV];
-    V=newV;
-  }
-  const price=V[0];
-  const Su=S*u, Sd=S*d;
-  const delta=(V1[1]-V1[0])/(Su-Sd);
-  const Suu=S*u*u,Sdd=S*d*d;
-  const dU=(V2[2]-V2[1])/(Suu-S), dD=(V2[1]-V2[0])/(S-Sdd);
-  const gamma=(dU-dD)/(0.5*(Suu-Sdd));
-  const theta=(V2[1]-price)/(2*dt)/365;
-  return {price,delta,gamma,theta};
-}
-
-/* ── Monte Carlo (seeded LCG for reproducibility) ───────── */
-function mulberry32(seed) {
-  return function() {
-    seed|=0; seed=seed+0x6D2B79F5|0;
-    let t=Math.imul(seed^seed>>>15,1|seed);
-    t=t+Math.imul(t^t>>>7,61|t)^t;
-    return ((t^t>>>14)>>>0)/4294967296;
-  }
-}
-function boxMuller(rand) {
-  const u1=rand(), u2=rand();
-  return Math.sqrt(-2*Math.log(u1+1e-10))*Math.cos(2*Math.PI*u2);
-}
-
-function monteCarloPrice(S,K,T,r,sigma,q=0,type='call',N=50000) {
-  const rand=mulberry32(42);
-  const drift=(r-q-0.5*sigma*sigma)*T, vol=sigma*Math.sqrt(T);
-  let sum=0, sum2=0;
-  const disc=Math.exp(-r*T);
-  for(let i=0;i<N/2;i++) {
-    const z=boxMuller(rand);
-    for(const sign of [1,-1]) {
-      const ST=S*Math.exp(drift+vol*sign*z);
-      const pay=Math.max(type==='call'?ST-K:K-ST,0)*disc;
-      sum+=pay; sum2+=pay*pay;
-    }
-  }
-  const price=sum/N;
-  const variance=sum2/N-price*price;
-  const se=Math.sqrt(variance/N);
-  return {price, se, ci:[price-1.96*se, price+1.96*se]};
-}
-
-/* ── Implied Vol solver (Newton-Raphson) ─────────────────── */
-function impliedVol(marketPrice,S,K,T,r,q=0,type='call') {
-  let sigma=Math.sqrt(2*Math.PI/T)*(marketPrice/S);
-  sigma=Math.max(0.01,Math.min(sigma,5));
-  for(let i=0;i<100;i++) {
-    const price=bsPrice(S,K,T,r,sigma,q,type);
-    const vega=bsGreeks(S,K,T,r,sigma,q,type).vega*100;
-    const err=price-marketPrice;
-    if(Math.abs(err)<1e-7) return sigma;
-    if(Math.abs(vega)<1e-12) break;
-    sigma-=err/vega;
-    sigma=Math.max(0.001,sigma);
-  }
-  return sigma;
-}
-
-/* ============================================================
-   STYLE CONSTANTS
-   ============================================================ */
 const C = {
-  bg:       '#04080f',
-  panel:    '#080e1a',
-  panel2:   '#0a1628',
-  border:   '#0d2137',
-  border2:  '#1a3a5c',
-  bs:       '#00d4ff',
-  binom:    '#00ff88',
-  mc:       '#ff6b35',
-  amer:     '#c084fc',
-  text:     '#e2f0ff',
-  muted:    '#4a7fa5',
-  dim:      '#1e3a52',
-  call:     '#00d4ff',
+  bg:       '#060a0f',
+  panel:    '#080d14',
+  panel2:   '#0a1220',
+  panel3:   '#0d1829',
+  border:   '#0f2035',
+  border2:  '#163352',
+  border3:  '#1d4570',
+  bs:       '#00c8ff',
+  binom:    '#00e87a',
+  mc:       '#ff7043',
+  amer:     '#b388ff',
+  text:     '#d4e8ff',
+  text2:    '#8ab4d4',
+  muted:    '#3d6680',
+  dim:      '#162535',
+  call:     '#00c8ff',
   put:      '#ff4f7b',
-  gold:     '#ffd700',
-  green:    '#00ff88',
-  red:      '#ff4444',
+  gold:     '#ffc107',
+  green:    '#00e87a',
+  red:      '#ff3d5a',
+  orange:   '#ff7043',
+  itm:      '#00e87a22',
+  otm:      '#ff3d5a11',
+  atm:      '#ffc10722',
 };
 
-const fontMono = '"JetBrains Mono", "Fira Code", "Cascadia Code", monospace';
-const fontDisplay = '"Share Tech Mono", "Courier New", monospace';
+const MONO = '"JetBrains Mono", "Fira Code", monospace';
+const DISPLAY = '"Share Tech Mono", "Courier New", monospace';
 
 /* ============================================================
-   TICK ANIMATION HOOK
+   BLACK-SCHOLES ENGINE (client-side fallback)
    ============================================================ */
-function useAnimatedValue(target, duration=400) {
-  const [display, setDisplay] = useState(target);
-  const prev = useRef(target);
+function erf(x) {
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,
+        a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const s=x<0?-1:1; x=Math.abs(x);
+  const t=1/(1+p*x);
+  return s*(1-((((a5*t+a4)*t+a3)*t+a2)*t+a1)*t*Math.exp(-x*x));
+}
+const ncdf = x => 0.5*(1+erf(x/Math.sqrt(2)));
+const npdf = x => Math.exp(-0.5*x*x)/Math.sqrt(2*Math.PI);
+
+function bsCalc(S,K,T,r,sigma,q,type) {
+  if(T<=0||sigma<=0) return {price:Math.max(type==='call'?S-K:K-S,0),d1:0,d2:0,delta:type==='call'?1:0,gamma:0,vega:0,theta:0,rho:0};
+  const sqT=Math.sqrt(T);
+  const d1=(Math.log(S/K)+(r-q+0.5*sigma*sigma)*T)/(sigma*sqT);
+  const d2=d1-sigma*sqT;
+  const eq=Math.exp(-q*T),er=Math.exp(-r*T),nd1=npdf(d1);
+  const price=type==='call'?S*eq*ncdf(d1)-K*er*ncdf(d2):K*er*ncdf(-d2)-S*eq*ncdf(-d1);
+  const delta=type==='call'?eq*ncdf(d1):eq*(ncdf(d1)-1);
+  const gamma=eq*nd1/(S*sigma*sqT);
+  const vega=S*eq*nd1*sqT/100;
+  const t1=-(S*eq*nd1*sigma)/(2*sqT);
+  const t2=type==='call'?q*S*eq*ncdf(d1)-r*K*er*ncdf(d2):-q*S*eq*ncdf(-d1)+r*K*er*ncdf(-d2);
+  const theta=(t1+t2)/365;
+  const rho=type==='call'?K*T*er*ncdf(d2)/100:-K*T*er*ncdf(-d2)/100;
+  return {price,d1,d2,delta,gamma,vega,theta,rho,nd1:ncdf(d1),nd2:ncdf(d2)};
+}
+
+/* ============================================================
+   HOOKS
+   ============================================================ */
+function useApi(url, deps=[]) {
+  const [data, setData]     = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]   = useState(null);
   useEffect(() => {
-    const start = prev.current, end = target, startTime = performance.now();
-    const tick = (now) => {
-      const p = Math.min((now-startTime)/duration,1);
-      const ease = p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
-      setDisplay(start+(end-start)*ease);
-      if(p<1) requestAnimationFrame(tick);
-      else prev.current=end;
+    if(!url) return;
+    setLoading(true); setError(null);
+    fetch(url)
+      .then(r=>r.ok?r.json():r.json().then(e=>{throw new Error(e.detail||'API error')}))
+      .then(d=>{setData(d);setLoading(false)})
+      .catch(e=>{setError(e.message);setLoading(false)});
+  }, deps);
+  return {data, loading, error};
+}
+
+function useAnimated(target, ms=300) {
+  const [val, setVal] = useState(target);
+  const ref = useRef(target);
+  useEffect(()=>{
+    const s=ref.current, start=performance.now();
+    const f=(now)=>{
+      const p=Math.min((now-start)/ms,1);
+      const e=1-Math.pow(1-p,3);
+      setVal(s+(target-s)*e);
+      if(p<1) requestAnimationFrame(f); else ref.current=target;
     };
-    requestAnimationFrame(tick);
-  }, [target]);
-  return display;
+    requestAnimationFrame(f);
+  },[target]);
+  return val;
 }
 
 /* ============================================================
-   SUB-COMPONENTS
+   SHARED UI PRIMITIVES
    ============================================================ */
+const TT = { background:C.panel2, border:`1px solid ${C.border2}`, fontFamily:MONO, fontSize:10, color:C.text };
 
-function ScanlineOverlay() {
+function Panel({children, style={}, glow}) {
   return (
     <div style={{
-      position:'fixed',top:0,left:0,right:0,bottom:0,
-      pointerEvents:'none',zIndex:9999,
-      background:'repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px)',
-    }}/>
+      background:C.panel, border:`1px solid ${C.border}`,
+      ...(glow?{boxShadow:`0 0 20px ${glow}15`}:{}),
+      ...style,
+    }}>{children}</div>
   );
 }
 
-function GridBg() {
+function PanelHeader({label, sub, color=C.bs, right}) {
   return (
     <div style={{
-      position:'fixed',top:0,left:0,right:0,bottom:0,
-      pointerEvents:'none',zIndex:0,
-      backgroundImage:`
-        linear-gradient(rgba(0,100,200,0.04) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,100,200,0.04) 1px, transparent 1px)`,
-      backgroundSize:'40px 40px',
-    }}/>
-  );
-}
-
-function HeaderBar() {
-  const [time, setTime] = useState(new Date());
-  useEffect(()=>{const t=setInterval(()=>setTime(new Date()),1000);return()=>clearInterval(t)},[]);
-  return (
-    <div style={{
-      display:'flex',alignItems:'center',justifyContent:'space-between',
-      padding:'10px 24px',borderBottom:`1px solid ${C.border2}`,
-      background:`linear-gradient(90deg,${C.bg},${C.panel2},${C.bg})`,
-      position:'relative',zIndex:10,
+      display:'flex',justifyContent:'space-between',alignItems:'center',
+      padding:'8px 14px', borderBottom:`1px solid ${C.border}`,
+      background:`linear-gradient(90deg,${color}08,transparent)`,
     }}>
-      <div style={{display:'flex',alignItems:'center',gap:16}}>
-        <div style={{
-          width:8,height:8,borderRadius:'50%',background:C.bs,
-          boxShadow:`0 0 12px ${C.bs}`,animation:'pulse 2s infinite'
-        }}/>
-        <span style={{fontFamily:fontDisplay,fontSize:11,color:C.muted,letterSpacing:4}}>
-          OPTIONS VALUATION ENGINE
-        </span>
-        <span style={{fontFamily:fontMono,fontSize:9,color:C.dim,letterSpacing:2}}>
-          v2.0 · PHASE I
-        </span>
+      <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <div style={{width:3,height:14,background:color,borderRadius:2}}/>
+        <span style={{fontFamily:MONO,fontSize:9,color,letterSpacing:3}}>{label}</span>
+        {sub&&<span style={{fontFamily:MONO,fontSize:8,color:C.muted}}>{sub}</span>}
       </div>
-      <div style={{display:'flex',gap:24,alignItems:'center'}}>
-        {['BS·ACTIVE','CRR·ACTIVE','MC·ACTIVE'].map((s,i)=>(
-          <span key={i} style={{
-            fontFamily:fontMono,fontSize:9,letterSpacing:2,
-            color:[C.bs,C.binom,C.mc][i],
-          }}>⬤ {s}</span>
-        ))}
-        <span style={{fontFamily:fontMono,fontSize:10,color:C.muted}}>
-          {time.toLocaleTimeString('en-GB',{hour12:false})} UTC
-        </span>
-      </div>
+      {right&&<div style={{fontFamily:MONO,fontSize:8,color:C.muted}}>{right}</div>}
     </div>
   );
 }
 
-function ParamSlider({label, value, min, max, step, onChange, fmt, unit='', formula}) {
+function Stat({label, value, sub, color=C.text, size=14}) {
   return (
-    <div style={{marginBottom:16}}>
-      <div style={{display:'flex',justifyContent:'space-between',marginBottom:4}}>
-        <span style={{fontFamily:fontMono,fontSize:10,color:C.muted,letterSpacing:2}}>{label}</span>
-        <div style={{display:'flex',alignItems:'baseline',gap:4}}>
-          <span style={{fontFamily:fontMono,fontSize:14,color:C.text,fontWeight:'bold'}}>
-            {fmt ? fmt(value) : value}
-          </span>
-          {unit && <span style={{fontFamily:fontMono,fontSize:9,color:C.muted}}>{unit}</span>}
-        </div>
-      </div>
-      <div style={{position:'relative'}}>
-        <input type="range" min={min} max={max} step={step} value={value}
-          onChange={e=>onChange(parseFloat(e.target.value))}
+    <div style={{padding:'8px 12px'}}>
+      <div style={{fontFamily:MONO,fontSize:8,color:C.muted,letterSpacing:2,marginBottom:2}}>{label}</div>
+      <div style={{fontFamily:DISPLAY,fontSize:size,color,fontWeight:'bold'}}>{value}</div>
+      {sub&&<div style={{fontFamily:MONO,fontSize:8,color:C.muted,marginTop:1}}>{sub}</div>}
+    </div>
+  );
+}
+
+function Badge({children, color}) {
+  return (
+    <span style={{
+      fontFamily:MONO,fontSize:8,padding:'2px 6px',
+      background:`${color}20`,color,border:`1px solid ${color}40`,
+      letterSpacing:1,
+    }}>{children}</span>
+  );
+}
+
+function Spinner() {
+  return (
+    <div style={{display:'flex',alignItems:'center',justifyContent:'center',padding:40}}>
+      <div style={{
+        width:20,height:20,border:`2px solid ${C.border2}`,
+        borderTop:`2px solid ${C.bs}`,borderRadius:'50%',
+        animation:'spin 0.8s linear infinite',
+      }}/>
+    </div>
+  );
+}
+
+function ErrorMsg({msg}) {
+  return (
+    <div style={{padding:16,fontFamily:MONO,fontSize:10,color:C.red,
+      background:`${C.red}10`,border:`1px solid ${C.red}30`,margin:12}}>
+      ⚠ {msg}
+    </div>
+  );
+}
+
+/* ============================================================
+   TICKER SEARCH BAR
+   ============================================================ */
+function TickerSearch({onSelect, current}) {
+  const [q, setQ]           = useState('');
+  const [results, setResults] = useState([]);
+  const [open, setOpen]     = useState(false);
+
+  useEffect(()=>{
+    if(!q) {setResults([]);return;}
+    fetch(`${API}/api/search?q=${q}`)
+      .then(r=>r.json()).then(d=>setResults(d.results||[])).catch(()=>{});
+  },[q]);
+
+  return (
+    <div style={{position:'relative'}}>
+      <div style={{display:'flex',alignItems:'center',gap:0}}>
+        <span style={{
+          fontFamily:MONO,fontSize:9,color:C.muted,padding:'6px 10px',
+          background:C.panel3,border:`1px solid ${C.border2}`,
+          borderRight:'none',letterSpacing:2,
+        }}>TICKER</span>
+        <input
+          value={q} placeholder={current||'AAPL, RELIANCE.NS...'}
+          onChange={e=>{setQ(e.target.value);setOpen(true)}}
+          onFocus={()=>setOpen(true)}
+          onBlur={()=>setTimeout(()=>setOpen(false),200)}
           style={{
-            width:'100%',appearance:'none',height:3,
-            background:`linear-gradient(90deg, ${C.bs} ${((value-min)/(max-min))*100}%, ${C.dim} 0%)`,
-            outline:'none',cursor:'pointer',
-            WebkitAppearance:'none',
+            fontFamily:DISPLAY,fontSize:14,color:C.text,
+            background:C.panel3,border:`1px solid ${C.border2}`,
+            padding:'6px 12px',outline:'none',width:200,
+            letterSpacing:2,
           }}
         />
+        <button onClick={()=>{onSelect(q.toUpperCase());setOpen(false);setQ('');}} style={{
+          fontFamily:MONO,fontSize:9,padding:'6px 14px',
+          background:C.bs+'20',border:`1px solid ${C.bs}40`,
+          color:C.bs,cursor:'pointer',letterSpacing:2,
+        }}>LOAD →</button>
       </div>
-      {formula && <div style={{fontFamily:fontMono,fontSize:8,color:C.dim,marginTop:2}}>{formula}</div>}
-    </div>
-  );
-}
-
-function GreekCard({symbol, name, value, desc, color=C.bs, anomaly}) {
-  const anim = useAnimatedValue(value||0);
-  const isPos = anim >= 0;
-  return (
-    <div style={{
-      background:C.panel,border:`1px solid ${C.border}`,borderTop:`2px solid ${color}`,
-      padding:'12px 14px',position:'relative',overflow:'hidden',
-    }}>
-      <div style={{
-        position:'absolute',top:0,right:0,width:40,height:40,
-        background:`radial-gradient(circle at top right, ${color}15, transparent)`,
-      }}/>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
-        <div>
-          <div style={{fontFamily:fontDisplay,fontSize:18,color,fontWeight:'bold'}}>
-            {symbol}
-          </div>
-          <div style={{fontFamily:fontMono,fontSize:8,color:C.muted,letterSpacing:2,marginTop:1}}>{name}</div>
-        </div>
-        <div style={{textAlign:'right'}}>
-          <div style={{
-            fontFamily:fontMono,fontSize:16,fontWeight:'bold',
-            color: anomaly ? C.gold : (isPos ? C.text : C.put),
-          }}>
-            {value != null ? (isPos&&value>0?'+':'')+anim.toFixed(5) : '—'}
-          </div>
-        </div>
-      </div>
-      <div style={{fontFamily:fontMono,fontSize:8,color:C.dim,marginTop:8,lineHeight:1.5}}>{desc}</div>
-    </div>
-  );
-}
-
-function ModelPriceCard({model, price, error, se, ci, extra, color, formula, detail}) {
-  const anim = useAnimatedValue(price||0);
-  return (
-    <div style={{
-      background:C.panel,border:`1px solid ${color}40`,
-      borderLeft:`3px solid ${color}`,padding:'16px 18px',
-      position:'relative',overflow:'hidden',flex:1,minWidth:0,
-    }}>
-      <div style={{
-        position:'absolute',inset:0,
-        background:`radial-gradient(ellipse at top left, ${color}08, transparent 60%)`,
-        pointerEvents:'none',
-      }}/>
-      <div style={{fontFamily:fontMono,fontSize:8,color,letterSpacing:3,marginBottom:8}}>{model}</div>
-      <div style={{fontFamily:fontDisplay,fontSize:26,color:C.text,fontWeight:'bold',marginBottom:4}}>
-        ${anim.toFixed(4)}
-      </div>
-      {formula && <div style={{fontFamily:fontMono,fontSize:8,color:C.dim,marginBottom:8}}>{formula}</div>}
-      {error != null && (
-        <div style={{fontFamily:fontMono,fontSize:9,color:C.muted}}>
-          Δ vs BS: <span style={{color:Math.abs(error)<0.01?C.green:C.gold}}>${Math.abs(error).toFixed(4)}</span>
+      {open && results.length>0 && (
+        <div style={{
+          position:'absolute',top:'100%',left:0,right:0,zIndex:100,
+          background:C.panel2,border:`1px solid ${C.border2}`,
+          boxShadow:`0 8px 32px ${C.bg}`,
+        }}>
+          {results.map(r=>(
+            <div key={r.ticker} onMouseDown={()=>{onSelect(r.ticker);setQ('');setOpen(false);}}
+              style={{
+                padding:'8px 12px',cursor:'pointer',display:'flex',
+                justifyContent:'space-between',alignItems:'center',
+                borderBottom:`1px solid ${C.border}`,
+              }}
+              onMouseEnter={e=>e.currentTarget.style.background=C.panel3}
+              onMouseLeave={e=>e.currentTarget.style.background='transparent'}
+            >
+              <span style={{fontFamily:DISPLAY,fontSize:12,color:C.bs}}>{r.ticker}</span>
+              <span style={{fontFamily:MONO,fontSize:9,color:C.muted}}>{r.name}</span>
+              <span style={{fontFamily:MONO,fontSize:8,color:C.gold}}>{r.market}</span>
+            </div>
+          ))}
         </div>
       )}
-      {se != null && (
-        <div style={{fontFamily:fontMono,fontSize:9,color:C.muted}}>
-          SE: <span style={{color:C.mc}}>±${se.toFixed(4)}</span>
-          {ci && <span style={{color:C.dim}}> · 95%CI [{ci[0].toFixed(3)}, {ci[1].toFixed(3)}]</span>}
-        </div>
-      )}
-      {extra && <div style={{fontFamily:fontMono,fontSize:9,color:C.amer,marginTop:4}}>{extra}</div>}
-      {detail && <div style={{fontFamily:fontMono,fontSize:8,color:C.dim,marginTop:4}}>{detail}</div>}
     </div>
   );
 }
 
-const TOOLTIP_STYLE = {
-  background:C.panel2, border:`1px solid ${C.border2}`,
-  fontFamily:fontMono, fontSize:10, color:C.text,
-};
+/* ============================================================
+   QUOTE HEADER
+   ============================================================ */
+function QuoteHeader({quote, loading}) {
+  const animPrice = useAnimated(quote?.price||0);
+  if(loading) return <div style={{padding:16}}><Spinner/></div>;
+  if(!quote) return null;
+  const up = quote.change >= 0;
+  return (
+    <div style={{
+      display:'flex',alignItems:'center',gap:0,
+      borderBottom:`1px solid ${C.border2}`,
+      background:`linear-gradient(90deg,${C.panel3},${C.panel})`,
+    }}>
+      <div style={{padding:'12px 20px',borderRight:`1px solid ${C.border2}`}}>
+        <div style={{fontFamily:DISPLAY,fontSize:22,color:C.text,letterSpacing:1}}>
+          {quote.ticker}
+        </div>
+        <div style={{fontFamily:MONO,fontSize:9,color:C.muted,marginTop:2}}>
+          {quote.flag} {quote.exchange} · {quote.name}
+        </div>
+      </div>
+      <div style={{padding:'12px 20px',borderRight:`1px solid ${C.border2}`}}>
+        <div style={{fontFamily:DISPLAY,fontSize:24,color:C.text,fontWeight:'bold'}}>
+          {quote.currency==='INR'?'₹':'$'}{animPrice.toFixed(2)}
+        </div>
+        <div style={{fontFamily:MONO,fontSize:11,color:up?C.green:C.red,marginTop:2}}>
+          {up?'▲':'▼'} {Math.abs(quote.change).toFixed(2)} ({Math.abs(quote.change_pct).toFixed(2)}%)
+        </div>
+      </div>
+      {[
+        ['30D HIST VOL', `${(quote.hist_vol_30d*100).toFixed(1)}%`, C.orange],
+        ['RISK-FREE r', `${(quote.risk_free_rate*100).toFixed(2)}%`, C.muted],
+        ['DIV YIELD q', `${(quote.dividend_yield*100).toFixed(2)}%`, C.muted],
+        ['MARKET CAP', quote.market_cap>1e12?`${(quote.market_cap/1e12).toFixed(2)}T`:
+          quote.market_cap>1e9?`${(quote.market_cap/1e9).toFixed(1)}B`:'N/A', C.text2],
+        ['SECTOR', quote.sector||'N/A', C.text2],
+      ].map(([k,v,c])=>(
+        <div key={k} style={{padding:'12px 16px',borderRight:`1px solid ${C.border}`}}>
+          <div style={{fontFamily:MONO,fontSize:8,color:C.muted,letterSpacing:2}}>{k}</div>
+          <div style={{fontFamily:MONO,fontSize:12,color:c,marginTop:3}}>{v}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   OPTIONS CHAIN TABLE
+   ============================================================ */
+function OptionsChainTable({chainData, spot}) {
+  const [view, setView]     = useState('calls');
+  const [sortBy, setSortBy] = useState('strike');
+  const [expiry, setExpiry] = useState(null);
+
+  if(!chainData) return <Spinner/>;
+
+  const contracts = (view==='calls'?chainData.calls:chainData.puts)||[];
+  const sorted    = [...contracts].sort((a,b)=>a[sortBy]>b[sortBy]?1:-1);
+
+  const cols = [
+    {key:'strike',    label:'STRIKE',  fmt:v=>`${v.toFixed(2)}`},
+    {key:'bid',       label:'BID',     fmt:v=>`${v.toFixed(2)}`},
+    {key:'ask',       label:'ASK',     fmt:v=>`${v.toFixed(2)}`},
+    {key:'mid',       label:'MID',     fmt:v=>`${v.toFixed(2)}`},
+    {key:'iv',        label:'IV %',    fmt:v=>v!=null?`${v.toFixed(1)}%`:'—'},
+    {key:'bs_price',  label:'BS PRICE',fmt:v=>`${v.toFixed(3)}`},
+    {key:'mispricing',label:'α EDGE',  fmt:v=>`${v>0?'+':''}${v.toFixed(3)}`},
+    {key:'greek_delta',label:'Δ DELTA',fmt:v=>`${v>0?'+':''}${v.toFixed(3)}`},
+    {key:'greek_gamma',label:'Γ GAMMA',fmt:v=>v.toFixed(4)},
+    {key:'greek_theta',label:'Θ/DAY',  fmt:v=>`${v.toFixed(4)}`},
+    {key:'volume',    label:'VOL',     fmt:v=>v.toLocaleString()},
+    {key:'open_interest',label:'OI',  fmt:v=>v.toLocaleString()},
+    {key:'moneyness', label:'ITM/OTM', fmt:v=>v},
+  ];
+
+  const rowBg = (row) => {
+    if(row.moneyness==='ITM') return C.itm;
+    if(row.moneyness==='ATM') return C.atm;
+    return 'transparent';
+  };
+
+  return (
+    <Panel>
+      <PanelHeader
+        label="LIVE OPTIONS CHAIN"
+        sub={`${chainData.ticker} · ${chainData.expiry} · ${chainData.total_contracts} contracts`}
+        color={C.bs}
+        right={
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+            {chainData.all_expiries?.slice(0,5).map(e=>(
+              <button key={e} onClick={()=>setExpiry(e)} style={{
+                fontFamily:MONO,fontSize:8,padding:'2px 6px',cursor:'pointer',
+                background:chainData.expiry===e?`${C.bs}30`:'transparent',
+                border:`1px solid ${chainData.expiry===e?C.bs:C.border2}`,
+                color:chainData.expiry===e?C.bs:C.muted,
+              }}>{e}</button>
+            ))}
+          </div>
+        }
+      />
+      <div style={{display:'flex',gap:0,borderBottom:`1px solid ${C.border}`}}>
+        {['calls','puts'].map(t=>(
+          <button key={t} onClick={()=>setView(t)} style={{
+            flex:1,padding:'8px',fontFamily:DISPLAY,fontSize:12,letterSpacing:2,
+            background:view===t?(t==='calls'?`${C.call}20`:`${C.put}20`):'transparent',
+            border:'none',borderBottom:view===t?`2px solid ${t==='calls'?C.call:C.put}`:'2px solid transparent',
+            color:view===t?(t==='calls'?C.call:C.put):C.muted,cursor:'pointer',
+          }}>{t.toUpperCase()} ({(view==='calls'?chainData.calls:chainData.puts)?.length||0})</button>
+        ))}
+      </div>
+      <div style={{overflowX:'auto', maxHeight:360, overflowY:'auto'}}>
+        <table style={{width:'100%',borderCollapse:'collapse',fontSize:10,fontFamily:MONO}}>
+          <thead>
+            <tr style={{background:C.panel3,position:'sticky',top:0,zIndex:1}}>
+              {cols.map(c=>(
+                <th key={c.key} onClick={()=>setSortBy(c.key)} style={{
+                  padding:'6px 10px',textAlign:'right',color:sortBy===c.key?C.bs:C.muted,
+                  letterSpacing:1,fontSize:8,cursor:'pointer',fontWeight:'normal',
+                  borderBottom:`1px solid ${C.border2}`,whiteSpace:'nowrap',
+                }}>
+                  {c.label}{sortBy===c.key?' ↑':''}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.map((row,i)=>(
+              <tr key={i} style={{
+                background:rowBg(row),
+                borderBottom:`1px solid ${C.border}`,
+              }}
+                onMouseEnter={e=>e.currentTarget.style.background=C.panel3}
+                onMouseLeave={e=>e.currentTarget.style.background=rowBg(row)}
+              >
+                {cols.map(c=>{
+                  const v = row[c.key];
+                  let color = C.text2;
+                  if(c.key==='mispricing') color=v>0?C.green:v<0?C.red:C.muted;
+                  if(c.key==='iv') color=C.orange;
+                  if(c.key==='moneyness') color=v==='ITM'?C.green:v==='ATM'?C.gold:C.muted;
+                  if(c.key==='strike') color=Math.abs(row.strike-spot)<spot*0.005?C.gold:C.text;
+                  return (
+                    <td key={c.key} style={{
+                      padding:'5px 10px',textAlign:'right',color,
+                      fontWeight:c.key==='strike'?'bold':'normal',
+                    }}>
+                      {v!=null?c.fmt(v):'—'}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div style={{
+        display:'flex',gap:16,padding:'8px 14px',
+        borderTop:`1px solid ${C.border}`,fontFamily:MONO,fontSize:8,color:C.muted,
+      }}>
+        <span>T = {chainData.T} yr</span>
+        <span>S = ${chainData.spot}</span>
+        <span>r = {(chainData.r*100).toFixed(2)}%</span>
+        <span style={{color:C.green}}>■ ITM</span>
+        <span style={{color:C.gold}}>■ ATM ±0.5%</span>
+        <span style={{color:C.muted}}>α EDGE = BS Price − Market Price</span>
+      </div>
+    </Panel>
+  );
+}
+
+/* ============================================================
+   MISPRICING / ALPHA CHART
+   ============================================================ */
+function MispricingChart({compareData, spot}) {
+  if(!compareData) return <Spinner/>;
+  const calls = compareData.contracts.filter(c=>c.type==='call');
+  const puts  = compareData.contracts.filter(c=>c.type==='put');
+  return (
+    <Panel>
+      <PanelHeader
+        label="MODEL vs MARKET · α EDGE ANALYSIS"
+        sub="Where Black-Scholes diverges from market pricing"
+        color={C.orange}
+        right={`Avg mispricing: $${compareData.summary.avg_mispricing}`}
+      />
+      <div style={{padding:16}}>
+        <ResponsiveContainer width="100%" height={220}>
+          <ScatterChart margin={{top:5,right:20,left:0,bottom:5}}>
+            <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
+            <XAxis dataKey="strike" stroke={C.muted} name="Strike"
+              tick={{fontFamily:MONO,fontSize:8,fill:C.muted}}
+              tickFormatter={v=>`$${v}`}/>
+            <YAxis dataKey="mispricing" stroke={C.muted} name="α Edge"
+              tick={{fontFamily:MONO,fontSize:8,fill:C.muted}}
+              tickFormatter={v=>`$${v.toFixed(2)}`}/>
+            <Tooltip contentStyle={TT}
+              formatter={(v,n)=>[typeof v==='number'?`$${v.toFixed(4)}`:v,n]}
+              cursor={{strokeDasharray:'3 3',stroke:C.muted}}/>
+            <ReferenceLine y={0} stroke={C.border3} strokeWidth={1.5}
+              label={{value:'Fair Value',fill:C.muted,fontFamily:MONO,fontSize:8}}/>
+            <ReferenceLine x={spot} stroke={C.gold} strokeDasharray="4 2"
+              label={{value:'Spot',fill:C.gold,fontFamily:MONO,fontSize:8}}/>
+            <Scatter data={calls} name="Calls α" fill={C.call} opacity={0.8}/>
+            <Scatter data={puts}  name="Puts α"  fill={C.put}  opacity={0.8}/>
+            <Legend wrapperStyle={{fontFamily:MONO,fontSize:9}}/>
+          </ScatterChart>
+        </ResponsiveContainer>
+        <div style={{
+          display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,
+          marginTop:12,padding:'8px 0',borderTop:`1px solid ${C.border}`,
+        }}>
+          {[
+            ['TOTAL CONTRACTS', compareData.summary.total_contracts, C.text],
+            ['MAX OVERPRICED K', `$${compareData.summary.max_overpriced}`, C.green],
+            ['MAX UNDERPRICED K', `$${compareData.summary.max_underpriced}`, C.red],
+          ].map(([k,v,c])=>(
+            <div key={k} style={{textAlign:'center'}}>
+              <div style={{fontFamily:MONO,fontSize:8,color:C.muted}}>{k}</div>
+              <div style={{fontFamily:MONO,fontSize:13,color:c,fontWeight:'bold'}}>{v}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/* ============================================================
+   IV SMILE CHART (real data)
+   ============================================================ */
+function IVSmileChart({chainData}) {
+  if(!chainData) return <Spinner/>;
+  const data = [...chainData.calls, ...chainData.puts]
+    .filter(c=>c.iv!=null)
+    .map(c=>({
+      strike: c.strike,
+      log_m:  parseFloat(Math.log(c.strike/chainData.spot).toFixed(3)),
+      iv:     c.iv,
+      type:   c.type,
+    }))
+    .sort((a,b)=>a.strike-b.strike);
+
+  const calls = data.filter(d=>d.type==='call');
+  const puts  = data.filter(d=>d.type==='put');
+
+  return (
+    <Panel>
+      <PanelHeader
+        label="LIVE IMPLIED VOLATILITY SMILE"
+        sub={`${chainData.ticker} · ${chainData.expiry} · Market prices`}
+        color={C.orange}
+        right="Phase 3 · Live data"
+      />
+      <div style={{padding:16}}>
+        <ResponsiveContainer width="100%" height={200}>
+          <ScatterChart margin={{top:5,right:20,left:0,bottom:5}}>
+            <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
+            <XAxis dataKey="strike" stroke={C.muted} name="Strike"
+              tick={{fontFamily:MONO,fontSize:8,fill:C.muted}}
+              tickFormatter={v=>`$${v}`}/>
+            <YAxis dataKey="iv" stroke={C.muted} name="IV"
+              tick={{fontFamily:MONO,fontSize:8,fill:C.muted}}
+              tickFormatter={v=>`${v.toFixed(0)}%`}/>
+            <Tooltip contentStyle={TT}
+              formatter={(v,n)=>[typeof v==='number'?`${v.toFixed(2)}%`:v,n]}/>
+            <ReferenceLine x={chainData.spot} stroke={C.gold} strokeDasharray="4 2"
+              label={{value:'Spot',fill:C.gold,fontFamily:MONO,fontSize:8}}/>
+            <Scatter data={calls} name="Call IV" fill={C.call} opacity={0.85}/>
+            <Scatter data={puts}  name="Put IV"  fill={C.put}  opacity={0.85}/>
+            <Legend wrapperStyle={{fontFamily:MONO,fontSize:9}}/>
+          </ScatterChart>
+        </ResponsiveContainer>
+        <div style={{fontFamily:MONO,fontSize:8,color:C.muted,marginTop:8}}>
+          Live market IV · Solved via Newton-Raphson from bid/ask mid prices
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/* ============================================================
+   MANUAL PRICER (left panel)
+   ============================================================ */
+function ManualPricer({defaultS, defaultR, defaultQ}) {
+  const [S,     setS]     = useState(defaultS||185);
+  const [K,     setK]     = useState(defaultS||185);
+  const [T,     setT]     = useState(45);
+  const [r,     setR]     = useState((defaultR||0.0525)*100);
+  const [sigma, setSigma] = useState(28);
+  const [q,     setQ]     = useState((defaultQ||0.0055)*100);
+  const [type,  setType]  = useState('call');
+
+  useEffect(()=>{
+    if(defaultS) {setS(defaultS);setK(defaultS);}
+    if(defaultR) setR(defaultR*100);
+    if(defaultQ) setQ(defaultQ*100);
+  },[defaultS,defaultR,defaultQ]);
+
+  const Ty=T/365, ry=r/100, sy=sigma/100, qy=q/100;
+  const bs = bsCalc(S,K,Ty,ry,sy,qy,type);
+  const intrinsic = Math.max(type==='call'?S-K:K-S,0);
+  const moneyness = type==='call'?(S>K*1.005?'ITM':S<K*0.995?'OTM':'ATM'):(S<K*0.995?'ITM':S>K*1.005?'OTM':'ATM');
+  const mColor    = moneyness==='ITM'?C.green:moneyness==='OTM'?C.red:C.gold;
+  const animPrice = useAnimated(bs.price);
+
+  const slider = (label, val, set, min, max, step, fmt, formula) => (
+    <div style={{marginBottom:14}}>
+      <div style={{display:'flex',justifyContent:'space-between',marginBottom:3}}>
+        <span style={{fontFamily:MONO,fontSize:8,color:C.muted,letterSpacing:2}}>{label}</span>
+        <span style={{fontFamily:MONO,fontSize:12,color:C.text,fontWeight:'bold'}}>{fmt(val)}</span>
+      </div>
+      <input type="range" min={min} max={max} step={step} value={val}
+        onChange={e=>set(parseFloat(e.target.value))}
+        style={{
+          width:'100%',appearance:'none',WebkitAppearance:'none',height:2,outline:'none',
+          background:`linear-gradient(90deg,${C.bs} ${((val-min)/(max-min))*100}%,${C.dim} 0%)`,
+        }}
+      />
+      {formula&&<div style={{fontFamily:MONO,fontSize:7,color:C.dim,marginTop:2}}>{formula}</div>}
+    </div>
+  );
+
+  return (
+    <Panel style={{height:'100%',overflowY:'auto'}}>
+      <PanelHeader label="MANUAL PRICER" sub="Override market inputs" color={C.bs}/>
+      <div style={{padding:'14px 16px'}}>
+        {/* Type toggle */}
+        <div style={{display:'flex',gap:0,marginBottom:16}}>
+          {['call','put'].map(t=>(
+            <button key={t} onClick={()=>setType(t)} style={{
+              flex:1,padding:8,border:'none',cursor:'pointer',fontFamily:DISPLAY,
+              fontSize:13,letterSpacing:2,
+              background:type===t?(t==='call'?`${C.call}25`:`${C.put}25`):`${C.dim}`,
+              borderBottom:type===t?`2px solid ${t==='call'?C.call:C.put}`:`2px solid ${C.border}`,
+              color:type===t?(t==='call'?C.call:C.put):C.muted,
+            }}>{t.toUpperCase()}</button>
+          ))}
+        </div>
+
+        {/* Price display */}
+        <div style={{
+          background:C.panel3,border:`1px solid ${C.border2}`,
+          padding:'12px 16px',marginBottom:16,
+          borderLeft:`3px solid ${type==='call'?C.call:C.put}`,
+        }}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
+            <span style={{fontFamily:MONO,fontSize:8,color:C.muted,letterSpacing:2}}>BS PRICE</span>
+            <Badge color={mColor}>{moneyness} · {(S/K).toFixed(3)}×</Badge>
+          </div>
+          <div style={{fontFamily:DISPLAY,fontSize:28,color:C.text,fontWeight:'bold',marginTop:4}}>
+            ${animPrice.toFixed(4)}
+          </div>
+          <div style={{display:'flex',gap:16,marginTop:6}}>
+            <span style={{fontFamily:MONO,fontSize:9,color:C.muted}}>
+              Intrinsic: <span style={{color:C.text}}>${intrinsic.toFixed(4)}</span>
+            </span>
+            <span style={{fontFamily:MONO,fontSize:9,color:C.muted}}>
+              Time: <span style={{color:C.bs}}>${Math.max(bs.price-intrinsic,0).toFixed(4)}</span>
+            </span>
+          </div>
+        </div>
+
+        {slider('SPOT  S', S, setS, 10, 2000, 0.5, v=>`$${v.toFixed(2)}`, 'Current stock price')}
+        {slider('STRIKE  K', K, setK, 10, 2000, 0.5, v=>`$${v.toFixed(2)}`, 'Option strike price')}
+        {slider('EXPIRY  T', T, setT, 1, 365, 1, v=>`${v}d`, `T = ${Ty.toFixed(4)} yr`)}
+        {slider('VOLATILITY  σ', sigma, setSigma, 1, 200, 0.5, v=>`${v.toFixed(1)}%`, 'Annualised implied vol')}
+        {slider('RISK-FREE  r', r, setR, 0, 20, 0.05, v=>`${v.toFixed(2)}%`, 'Continuously compounded')}
+        {slider('DIVIDEND  q', q, setQ, 0, 15, 0.05, v=>`${v.toFixed(2)}%`, 'Merton (1973) continuous yield')}
+
+        {/* Greeks */}
+        <div style={{borderTop:`1px solid ${C.border}`,paddingTop:12,marginTop:4}}>
+          <div style={{fontFamily:MONO,fontSize:8,color:C.muted,letterSpacing:3,marginBottom:8}}>GREEKS</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+            {[
+              ['Δ DELTA', bs.delta, C.bs],
+              ['Γ GAMMA', bs.gamma, C.binom],
+              ['ν VEGA', bs.vega, C.orange],
+              ['Θ THETA', bs.theta, C.put],
+              ['ρ RHO', bs.rho, C.amer],
+              ['N(d₂) ITM%', bs.nd2, C.gold],
+            ].map(([k,v,c])=>(
+              <div key={k} style={{
+                background:C.panel3,padding:'6px 8px',
+                borderLeft:`2px solid ${c}`,
+              }}>
+                <div style={{fontFamily:MONO,fontSize:7,color:C.muted}}>{k}</div>
+                <div style={{fontFamily:MONO,fontSize:11,color:c,fontWeight:'bold'}}>
+                  {v>0&&k!=='Γ GAMMA'&&k!=='ν VEGA'&&k!=='N(d₂) ITM%'?'+':''}{v.toFixed(5)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* d1/d2 */}
+        <div style={{
+          marginTop:12,padding:'8px 10px',background:C.panel3,
+          border:`1px solid ${C.border}`,fontFamily:MONO,fontSize:9,
+        }}>
+          <div style={{display:'flex',justifyContent:'space-between',color:C.muted,marginBottom:4}}>
+            <span>d₁ = {bs.d1.toFixed(6)}</span>
+            <span>d₂ = {bs.d2.toFixed(6)}</span>
+          </div>
+          <div style={{display:'flex',justifyContent:'space-between',color:C.dim}}>
+            <span>N(d₁) = {bs.nd1.toFixed(6)}</span>
+            <span>N(d₂) = {bs.nd2.toFixed(6)}</span>
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
 
 /* ============================================================
    PAYOFF CHART
    ============================================================ */
-function PayoffChart({S,K,T,r,sigma,q,type,bsP,binomP,mcP}) {
-  const data = [];
-  const lo = S*0.45, hi = S*1.85;
-  for(let i=0;i<=80;i++) {
-    const st = lo+(hi-lo)*(i/80);
-    const payoff = type==='call' ? Math.max(st-K,0) : Math.max(K-st,0);
-    data.push({
-      S: parseFloat(st.toFixed(2)),
-      payoff: parseFloat(payoff.toFixed(4)),
-      pnl_bs:    parseFloat((payoff-bsP).toFixed(4)),
-      pnl_binom: parseFloat((payoff-binomP).toFixed(4)),
-      pnl_mc:    parseFloat((payoff-mcP).toFixed(4)),
-    });
+function PayoffChart({S, K, T, r, sigma, q, type, price}) {
+  const data=[];
+  for(let i=0;i<=80;i++){
+    const s=S*0.4+S*1.6*(i/80);
+    const payoff=type==='call'?Math.max(s-K,0):Math.max(K-s,0);
+    data.push({S:parseFloat(s.toFixed(1)), payoff:parseFloat(payoff.toFixed(3)), pnl:parseFloat((payoff-price).toFixed(3))});
   }
   return (
-    <div>
-      <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3,marginBottom:12}}>
-        PAYOFF DIAGRAM — NET P&L AT EXPIRY
+    <Panel>
+      <PanelHeader label="PAYOFF AT EXPIRY" sub="Net P&L diagram" color={C.binom}/>
+      <div style={{padding:'12px 16px'}}>
+        <ResponsiveContainer width="100%" height={180}>
+          <AreaChart data={data} margin={{top:5,right:10,left:0,bottom:5}}>
+            <defs>
+              <linearGradient id="gP" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={C.binom} stopOpacity={0.3}/>
+                <stop offset="95%" stopColor={C.binom} stopOpacity={0}/>
+              </linearGradient>
+            </defs>
+            <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
+            <XAxis dataKey="S" stroke={C.muted} tick={{fontFamily:MONO,fontSize:7,fill:C.muted}} tickFormatter={v=>`$${v}`}/>
+            <YAxis stroke={C.muted} tick={{fontFamily:MONO,fontSize:7,fill:C.muted}} tickFormatter={v=>`$${v}`}/>
+            <Tooltip contentStyle={TT} formatter={(v)=>[`$${v.toFixed(3)}`,'P&L']} labelFormatter={v=>`S=${v}`}/>
+            <ReferenceLine y={0} stroke={C.dim} strokeWidth={1}/>
+            <ReferenceLine x={K} stroke={C.gold} strokeDasharray="4 2" strokeWidth={1}
+              label={{value:`K`,fill:C.gold,fontFamily:MONO,fontSize:8}}/>
+            <ReferenceLine x={S} stroke={C.muted} strokeDasharray="2 2" strokeWidth={1}
+              label={{value:`S`,fill:C.muted,fontFamily:MONO,fontSize:8}}/>
+            <Area type="monotone" dataKey="pnl" stroke={C.binom} fill="url(#gP)" strokeWidth={2} dot={false}/>
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
-      <ResponsiveContainer width="100%" height={220}>
-        <AreaChart data={data} margin={{top:5,right:10,left:0,bottom:5}}>
-          <defs>
-            <linearGradient id="gBS" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={C.bs} stopOpacity={0.3}/>
-              <stop offset="95%" stopColor={C.bs} stopOpacity={0}/>
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
-          <XAxis dataKey="S" stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>`$${v.toFixed(0)}`}/>
-          <YAxis stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>`$${v.toFixed(1)}`}/>
-          <Tooltip contentStyle={TOOLTIP_STYLE}
-            formatter={(v,n)=>[`$${v.toFixed(3)}`,n]} labelFormatter={v=>`S = $${v}`}/>
-          <ReferenceLine y={0} stroke={C.dim} strokeWidth={1}/>
-          <ReferenceLine x={K} stroke={C.gold} strokeDasharray="4 2" strokeWidth={1}
-            label={{value:`K=$${K}`,fill:C.gold,fontFamily:fontMono,fontSize:8,position:'top'}}/>
-          <ReferenceLine x={S} stroke={C.muted} strokeDasharray="2 2" strokeWidth={1}
-            label={{value:`S=$${S}`,fill:C.muted,fontFamily:fontMono,fontSize:8,position:'insideTopRight'}}/>
-          <Area type="monotone" dataKey="pnl_bs" stroke={C.bs} fill="url(#gBS)"
-            strokeWidth={2} dot={false} name="P&L (BS)"/>
-          <Line type="monotone" dataKey="pnl_binom" stroke={C.binom}
-            strokeWidth={1.5} dot={false} strokeDasharray="5 3" name="P&L (Binom)"/>
-          <Line type="monotone" dataKey="pnl_mc" stroke={C.mc}
-            strokeWidth={1.5} dot={false} strokeDasharray="2 3" name="P&L (MC)"/>
-          <Legend wrapperStyle={{fontFamily:fontMono,fontSize:9,color:C.muted}}/>
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-/* ============================================================
-   GREEKS vs SPOT CHART
-   ============================================================ */
-function GreeksChart({S,K,T,r,sigma,q,type}) {
-  const [activeGreek, setActiveGreek] = useState('delta');
-  const data = [];
-  for(let i=0;i<=60;i++) {
-    const s = S*0.5+S*i*(1.2/60);
-    const g = bsGreeks(s,K,T,r,sigma,q,type);
-    data.push({S:parseFloat(s.toFixed(2)), delta:parseFloat(g.delta.toFixed(5)),
-      gamma:parseFloat(g.gamma.toFixed(5)), vega:parseFloat(g.vega.toFixed(5)),
-      theta:parseFloat(g.theta.toFixed(5))});
-  }
-  const greekDefs = [
-    {key:'delta',sym:'Δ',color:C.bs},
-    {key:'gamma',sym:'Γ',color:C.binom},
-    {key:'vega', sym:'ν',color:C.mc},
-    {key:'theta',sym:'Θ',color:C.put},
-  ];
-  const gd = greekDefs.find(g=>g.key===activeGreek);
-  return (
-    <div>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-        <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3}}>GREEKS vs SPOT PRICE</div>
-        <div style={{display:'flex',gap:8}}>
-          {greekDefs.map(g=>(
-            <button key={g.key} onClick={()=>setActiveGreek(g.key)} style={{
-              fontFamily:fontMono,fontSize:9,padding:'3px 8px',cursor:'pointer',border:'none',
-              background:activeGreek===g.key?g.color+'30':'transparent',
-              color:activeGreek===g.key?g.color:C.dim,
-              borderBottom:activeGreek===g.key?`1px solid ${g.color}`:'1px solid transparent',
-            }}>{g.sym} {g.key}</button>
-          ))}
-        </div>
-      </div>
-      <ResponsiveContainer width="100%" height={200}>
-        <AreaChart data={data} margin={{top:5,right:10,left:0,bottom:5}}>
-          <defs>
-            <linearGradient id="gGreek" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor={gd.color} stopOpacity={0.25}/>
-              <stop offset="95%" stopColor={gd.color} stopOpacity={0}/>
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
-          <XAxis dataKey="S" stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>`$${v.toFixed(0)}`}/>
-          <YAxis stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>v.toFixed(3)}/>
-          <Tooltip contentStyle={TOOLTIP_STYLE}
-            formatter={(v,n)=>[v.toFixed(5),n]} labelFormatter={v=>`S = $${v}`}/>
-          <ReferenceLine y={0} stroke={C.dim}/>
-          <ReferenceLine x={K} stroke={C.gold} strokeDasharray="4 2" strokeWidth={1}/>
-          <ReferenceLine x={S} stroke={C.muted} strokeDasharray="2 2" strokeWidth={1}/>
-          <Area type="monotone" dataKey={activeGreek} stroke={gd.color}
-            fill="url(#gGreek)" strokeWidth={2} dot={false} name={gd.sym}/>
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-/* ============================================================
-   VOL SMILE CHART
-   ============================================================ */
-function VolSmileChart({S,T,r,q,type}) {
-  const data = [];
-  for(let i=0;i<=40;i++) {
-    const k = S*0.7+S*0.6*(i/40);
-    // Synthetic vol smile: flat BS + skew + smile curvature
-    const m = Math.log(k/S);
-    const baseVol = 0.22;
-    const skew = -0.08*m;        // Negative skew (equity smile)
-    const smile = 0.06*m*m;     // Convexity
-    const implVol = baseVol+skew+smile;
-    data.push({
-      K: parseFloat(k.toFixed(1)),
-      IV: parseFloat((implVol*100).toFixed(2)),
-      ATM: parseFloat((baseVol*100).toFixed(2)),
-    });
-  }
-  return (
-    <div>
-      <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3,marginBottom:12}}>
-        IMPLIED VOLATILITY SMILE · ln(K/S) PARAMETRISATION
-      </div>
-      <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data} margin={{top:5,right:10,left:0,bottom:5}}>
-          <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
-          <XAxis dataKey="K" stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>`$${v}`}/>
-          <YAxis stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>`${v}%`}/>
-          <Tooltip contentStyle={TOOLTIP_STYLE}
-            formatter={(v,n)=>[`${v.toFixed(2)}%`,n]} labelFormatter={v=>`K=$${v}`}/>
-          <ReferenceLine x={S} stroke={C.gold} strokeDasharray="4 2" strokeWidth={1}
-            label={{value:'ATM',fill:C.gold,fontFamily:fontMono,fontSize:8}}/>
-          <Line type="monotone" dataKey="IV" stroke={C.bs} strokeWidth={2.5} dot={false} name="IV Smile"/>
-          <Line type="monotone" dataKey="ATM" stroke={C.dim} strokeWidth={1}
-            strokeDasharray="4 2" dot={false} name="Flat Vol"/>
-        </LineChart>
-      </ResponsiveContainer>
-      <div style={{fontFamily:fontMono,fontSize:8,color:C.dim,marginTop:6}}>
-        ⚠ Synthetic smile shown · Phase 3 will plot live market IV surface from options chain
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   CONVERGENCE CHART
-   ============================================================ */
-function ConvergenceChart({S,K,T,r,sigma,q,type}) {
-  const bsRef = bsPrice(S,K,T,r,sigma,q,type);
-  const data = [];
-  for(let n=5;n<=200;n+=5) {
-    const bin = binomialPrice(S,K,T,r,sigma,q,type,n,'european');
-    data.push({
-      N: n,
-      Binomial: parseFloat(bin.price.toFixed(5)),
-      BS: parseFloat(bsRef.toFixed(5)),
-    });
-  }
-  return (
-    <div>
-      <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3,marginBottom:12}}>
-        BINOMIAL CONVERGENCE · N-STEP CRR → BLACK-SCHOLES
-      </div>
-      <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data} margin={{top:5,right:10,left:0,bottom:5}}>
-          <CartesianGrid stroke={C.border} strokeDasharray="2 4" strokeOpacity={0.4}/>
-          <XAxis dataKey="N" stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            label={{value:'Steps (N)',position:'insideBottom',fill:C.muted,fontFamily:fontMono,fontSize:8,offset:-2}}/>
-          <YAxis stroke={C.muted} tick={{fontFamily:fontMono,fontSize:8,fill:C.muted}}
-            tickFormatter={v=>`$${v.toFixed(2)}`} domain={['auto','auto']}/>
-          <Tooltip contentStyle={TOOLTIP_STYLE}
-            formatter={(v,n)=>[`$${v.toFixed(5)}`,n]} labelFormatter={v=>`N = ${v} steps`}/>
-          <Line type="monotone" dataKey="Binomial" stroke={C.binom} strokeWidth={1.5} dot={false} name="CRR Binomial"/>
-          <Line type="monotone" dataKey="BS" stroke={C.bs} strokeWidth={2} strokeDasharray="5 3" dot={false} name="Black-Scholes (exact)"/>
-          <Legend wrapperStyle={{fontFamily:fontMono,fontSize:9,color:C.muted}}/>
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-/* ============================================================
-   FORMULA PANEL
-   ============================================================ */
-function FormulaPanel({d1,d2,S,K,T,r,sigma,q,type}) {
-  const nd1=normCDF(d1), nd2=normCDF(d2);
-  const expQ=Math.exp(-q*T), expR=Math.exp(-r*T);
-  const rows = [
-    ['d₁','(ln(S/K) + (r−q+½σ²)T) / σ√T', d1.toFixed(6)],
-    ['d₂','d₁ − σ√T', d2.toFixed(6)],
-    ['N(d₁)',type==='call'?'Delta-related hedge ratio':'1−N(d₁)', nd1.toFixed(6)],
-    ['N(d₂)','Risk-neutral ITM probability', nd2.toFixed(6)],
-    ['S·e^(−qT)','Dividend-adjusted spot', (S*expQ).toFixed(4)],
-    ['K·e^(−rT)','PV of strike (discounted)', (K*expR).toFixed(4)],
-    [type==='call'?'Call Price':'Put Price',
-      type==='call'?'S·e^(−qT)·N(d₁) − K·e^(−rT)·N(d₂)':'K·e^(−rT)·N(−d₂) − S·e^(−qT)·N(−d₁)',
-      bsPrice(S,K,T,r,sigma,q,type).toFixed(6)],
-  ];
-  return (
-    <div style={{background:C.panel,border:`1px solid ${C.border}`,padding:'16px'}}>
-      <div style={{fontFamily:fontMono,fontSize:9,color:C.bs,letterSpacing:3,marginBottom:12}}>
-        LIVE FORMULA COMPUTATION · BLACK-SCHOLES
-      </div>
-      <table style={{width:'100%',borderCollapse:'collapse'}}>
-        <tbody>
-          {rows.map(([sym,formula,val],i)=>(
-            <tr key={i} style={{borderBottom:`1px solid ${C.border}`}}>
-              <td style={{fontFamily:fontDisplay,fontSize:11,color:C.bs,padding:'6px 8px',width:80}}>{sym}</td>
-              <td style={{fontFamily:fontMono,fontSize:9,color:C.muted,padding:'6px 8px'}}>{formula}</td>
-              <td style={{fontFamily:fontMono,fontSize:11,color:C.text,padding:'6px 8px',textAlign:'right',whiteSpace:'nowrap'}}>{val}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    </Panel>
   );
 }
 
@@ -591,204 +701,157 @@ function FormulaPanel({d1,d2,S,K,T,r,sigma,q,type}) {
    MAIN APP
    ============================================================ */
 export default function App() {
-  const [S,     setS]     = useState(185);
-  const [K,     setK]     = useState(185);
-  const [T,     setT]     = useState(45);
-  const [r,     setR]     = useState(5.25);
-  const [sigma, setSigma] = useState(28);
-  const [q,     setQ]     = useState(0.55);
-  const [type,  setType]  = useState('call');
+  const [ticker, setTicker]   = useState('AAPL');
+  const [activeTab, setTab]   = useState('chain');
+  const [apiOnline, setApiOnline] = useState(false);
 
-  const Ty = T/365, ry = r/100, sy = sigma/100, qy = q/100;
+  // Check API health
+  useEffect(()=>{
+    fetch(`${API}/health`)
+      .then(r=>r.json()).then(()=>setApiOnline(true)).catch(()=>setApiOnline(false));
+    const t=setInterval(()=>{
+      fetch(`${API}/health`).then(()=>setApiOnline(true)).catch(()=>setApiOnline(false));
+    },10000);
+    return()=>clearInterval(t);
+  },[]);
 
-  // Compute all models
-  const {d1,d2}    = bsD1D2(S,K,Ty,ry,sy,qy);
-  const bsP        = bsPrice(S,K,Ty,ry,sy,qy,type);
-  const bsG        = bsGreeks(S,K,Ty,ry,sy,qy,type);
-  const binEuro    = binomialPrice(S,K,Ty,ry,sy,qy,type,150,'european');
-  const binAmer    = binomialPrice(S,K,Ty,ry,sy,qy,type,150,'american');
-  const mc         = monteCarloPrice(S,K,Ty,ry,sy,qy,type,30000);
-  const intrinsic  = Math.max(type==='call'?S-K:K-S, 0);
-  const extrinsic  = Math.max(bsP-intrinsic, 0);
-  const eep        = Math.max(binAmer.price-binEuro.price, 0);
-  const moneyness  = type==='call'
-    ? (S>K*1.005?'ITM':S<K*0.995?'OTM':'ATM')
-    : (S<K*0.995?'ITM':S>K*1.005?'OTM':'ATM');
-  const mColor     = moneyness==='ITM'?C.green:moneyness==='OTM'?C.put:C.gold;
+  const {data:quote,   loading:qLoad,  error:qErr}  = useApi(ticker?`${API}/api/quote/${ticker}`:[ticker]);
+  const {data:chain,   loading:cLoad,  error:cErr}  = useApi(ticker?`${API}/api/chain/${ticker}`:[ticker]);
+  const {data:compare, loading:mpLoad, error:mpErr} = useApi(ticker?`${API}/api/compare/${ticker}`:[ticker]);
+
+  const [time, setTime] = useState(new Date());
+  useEffect(()=>{const t=setInterval(()=>setTime(new Date()),1000);return()=>clearInterval(t)},[]);
+
+  const tabs = [
+    {id:'chain',   label:'OPTIONS CHAIN'},
+    {id:'alpha',   label:'α EDGE / MISPRICING'},
+    {id:'smile',   label:'IV SMILE'},
+  ];
 
   return (
-    <div style={{
-      minHeight:'100vh', background:C.bg, color:C.text,
-      fontFamily:fontMono, position:'relative',
-    }}>
+    <div style={{minHeight:'100vh',background:C.bg,color:C.text,fontFamily:MONO}}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=JetBrains+Mono:wght@300;400;700&display=swap');
-        * { box-sizing: border-box; margin:0; padding:0; }
-        input[type=range] { cursor:pointer; }
-        input[type=range]::-webkit-slider-thumb {
-          -webkit-appearance:none; width:12px; height:12px;
-          border-radius:50%; background:${C.bs};
-          border:2px solid ${C.bg}; box-shadow:0 0 8px ${C.bs};
+        *{box-sizing:border-box;margin:0;padding:0}
+        input[type=range]{cursor:pointer}
+        input[type=range]::-webkit-slider-thumb{
+          -webkit-appearance:none;width:10px;height:10px;border-radius:50%;
+          background:${C.bs};border:2px solid ${C.bg};box-shadow:0 0 6px ${C.bs};
         }
-        @keyframes pulse { 0%,100%{opacity:1}50%{opacity:0.3} }
-        @keyframes fadeIn { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:translateY(0)} }
-        ::-webkit-scrollbar{width:4px;background:${C.bg}}
+        @keyframes spin{to{transform:rotate(360deg)}}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.3}}
+        ::-webkit-scrollbar{width:3px;height:3px;background:${C.bg}}
         ::-webkit-scrollbar-thumb{background:${C.border2}}
-        button{outline:none;cursor:pointer;}
+        button{outline:none}
       `}</style>
 
-      <ScanlineOverlay/>
-      <GridBg/>
+      {/* ── TOP NAV BAR ─────────────────────────────────────── */}
+      <div style={{
+        display:'flex',alignItems:'center',justifyContent:'space-between',
+        padding:'0 16px',height:40,
+        borderBottom:`1px solid ${C.border2}`,
+        background:`linear-gradient(90deg,${C.panel3},${C.panel})`,
+      }}>
+        <div style={{display:'flex',alignItems:'center',gap:20}}>
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
+            <div style={{width:6,height:6,borderRadius:'50%',background:C.bs,boxShadow:`0 0 8px ${C.bs}`,animation:'pulse 2s infinite'}}/>
+            <span style={{fontFamily:DISPLAY,fontSize:11,color:C.text2,letterSpacing:4}}>OPTIONS VALUATION ENGINE</span>
+            <span style={{fontFamily:MONO,fontSize:8,color:C.muted}}>v3.0 · PHASE III</span>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:6}}>
+            <div style={{width:5,height:5,borderRadius:'50%',background:apiOnline?C.green:C.red,
+              boxShadow:apiOnline?`0 0 6px ${C.green}`:undefined}}/>
+            <span style={{fontFamily:MONO,fontSize:8,color:apiOnline?C.green:C.red}}>
+              {apiOnline?'API ONLINE':'API OFFLINE · START BACKEND'}
+            </span>
+          </div>
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:16}}>
+          <TickerSearch onSelect={t=>{setTicker(t);setTab('chain')}} current={ticker}/>
+          <span style={{fontFamily:MONO,fontSize:9,color:C.muted}}>
+            {time.toLocaleTimeString('en-GB',{hour12:false})} UTC
+          </span>
+        </div>
+      </div>
 
-      <div style={{position:'relative',zIndex:1}}>
-        <HeaderBar/>
+      {/* ── QUOTE HEADER ──────────────────────────────────────── */}
+      {!apiOnline ? (
+        <div style={{
+          padding:'20px',background:`${C.red}10`,border:`1px solid ${C.red}30`,
+          margin:16,fontFamily:MONO,fontSize:11,color:C.red,
+        }}>
+          ⚠ Backend API is offline. Start it with:<br/><br/>
+          <code style={{color:C.orange}}>cd ~/Desktop/OptionVal_V1 && pip install fastapi uvicorn yfinance scipy && python api.py</code><br/><br/>
+          The Manual Pricer below works without the API. Live market data requires the backend.
+        </div>
+      ) : (
+        <QuoteHeader quote={quote} loading={qLoad}/>
+      )}
 
-        {/* ── MAIN LAYOUT ─────────────────────────────── */}
-        <div style={{display:'grid',gridTemplateColumns:'300px 1fr',gap:0,height:'calc(100vh - 45px)',overflow:'hidden'}}>
+      {/* ── MAIN LAYOUT ───────────────────────────────────────── */}
+      <div style={{display:'grid',gridTemplateColumns:'280px 1fr',height:'calc(100vh - 120px)',overflow:'hidden'}}>
 
-          {/* ── LEFT PANEL: INPUTS ───────────────────── */}
+        {/* LEFT: Manual Pricer */}
+        <div style={{borderRight:`1px solid ${C.border2}`,overflow:'auto'}}>
+          <ManualPricer
+            defaultS={quote?.price}
+            defaultR={quote?.risk_free_rate}
+            defaultQ={quote?.dividend_yield}
+          />
+        </div>
+
+        {/* RIGHT: Tabbed market data */}
+        <div style={{overflow:'auto',display:'flex',flexDirection:'column'}}>
+
+          {/* Tab bar */}
           <div style={{
-            borderRight:`1px solid ${C.border2}`,
-            background:C.panel,overflow:'auto',padding:20,
+            display:'flex',borderBottom:`1px solid ${C.border2}`,
+            background:C.panel3,flexShrink:0,
           }}>
-            {/* Option type toggle */}
-            <div style={{marginBottom:24}}>
-              <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3,marginBottom:10}}>
-                OPTION TYPE
+            {tabs.map(tab=>(
+              <button key={tab.id} onClick={()=>setTab(tab.id)} style={{
+                padding:'10px 20px',border:'none',cursor:'pointer',
+                fontFamily:MONO,fontSize:9,letterSpacing:2,
+                background:'transparent',
+                borderBottom:activeTab===tab.id?`2px solid ${C.bs}`:'2px solid transparent',
+                color:activeTab===tab.id?C.bs:C.muted,
+              }}>{tab.label}</button>
+            ))}
+            {quote && (
+              <div style={{marginLeft:'auto',display:'flex',alignItems:'center',padding:'0 16px',gap:12}}>
+                <Badge color={C.binom}>LIVE DATA</Badge>
+                <span style={{fontFamily:MONO,fontSize:8,color:C.muted}}>
+                  {chain?.total_contracts||0} contracts · {chain?.expiry||'—'}
+                </span>
               </div>
-              <div style={{display:'flex',gap:0}}>
-                {['call','put'].map(t=>(
-                  <button key={t} onClick={()=>setType(t)} style={{
-                    flex:1,padding:'10px',border:'none',
-                    background:type===t?(t==='call'?C.bs+'30':C.put+'30'):'transparent',
-                    borderBottom:type===t?`2px solid ${t==='call'?C.bs:C.put}`:`2px solid ${C.border}`,
-                    color:type===t?(t==='call'?C.bs:C.put):C.muted,
-                    fontFamily:fontDisplay,fontSize:13,letterSpacing:2,
-                    transition:'all 0.2s',
-                  }}>{t.toUpperCase()}</button>
-                ))}
-              </div>
-            </div>
-
-            {/* Moneyness indicator */}
-            <div style={{
-              background:mColor+'15',border:`1px solid ${mColor}40`,
-              padding:'8px 12px',marginBottom:20,display:'flex',
-              justifyContent:'space-between',alignItems:'center',
-            }}>
-              <span style={{fontFamily:fontMono,fontSize:9,color:C.muted}}>MONEYNESS</span>
-              <span style={{fontFamily:fontDisplay,fontSize:13,color:mColor,letterSpacing:2}}>
-                {moneyness}  ·  {(S/K).toFixed(4)}×
-              </span>
-            </div>
-
-            {/* Sliders */}
-            <ParamSlider label="SPOT PRICE  S" value={S} min={50} max={500} step={0.5}
-              onChange={setS} fmt={v=>`$${v.toFixed(2)}`} formula="Current stock price"/>
-            <ParamSlider label="STRIKE PRICE  K" value={K} min={50} max={500} step={0.5}
-              onChange={setK} fmt={v=>`$${v.toFixed(2)}`} formula="Agreed buy/sell price"/>
-            <ParamSlider label="DAYS TO EXPIRY  T" value={T} min={1} max={365} step={1}
-              onChange={setT} fmt={v=>`${v}d`} formula={`T = ${Ty.toFixed(4)} years`}/>
-            <ParamSlider label="VOLATILITY  σ" value={sigma} min={1} max={150} step={0.5}
-              onChange={setSigma} fmt={v=>`${v.toFixed(1)}%`} formula="Annualised implied vol"/>
-            <ParamSlider label="RISK-FREE RATE  r" value={r} min={0} max={15} step={0.05}
-              onChange={setR} fmt={v=>`${v.toFixed(2)}%`} formula="Continuously compounded"/>
-            <ParamSlider label="DIVIDEND YIELD  q" value={q} min={0} max={10} step={0.05}
-              onChange={setQ} fmt={v=>`${v.toFixed(2)}%`} formula="Merton (1973) extension"/>
-
-            {/* Quick stats */}
-            <div style={{borderTop:`1px solid ${C.border}`,paddingTop:16,marginTop:8}}>
-              <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3,marginBottom:10}}>
-                DECOMPOSITION
-              </div>
-              {[
-                ['Intrinsic Value', `$${intrinsic.toFixed(4)}`, C.text],
-                ['Extrinsic (Time)', `$${extrinsic.toFixed(4)}`, C.bs],
-                ['d₁', d1.toFixed(5), C.muted],
-                ['d₂', d2.toFixed(5), C.muted],
-                ['N(d₁)', normCDF(d1).toFixed(5), C.muted],
-                ['N(d₂) — ITM prob', normCDF(d2).toFixed(5), C.gold],
-                ['Early Ex. Premium', `$${eep.toFixed(4)}`, eep>0?C.amer:C.dim],
-              ].map(([k,v,c])=>(
-                <div key={k} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:`1px solid ${C.border}`}}>
-                  <span style={{fontSize:9,color:C.muted}}>{k}</span>
-                  <span style={{fontSize:10,color:c,fontWeight:'bold'}}>{v}</span>
-                </div>
-              ))}
-            </div>
+            )}
           </div>
 
-          {/* ── RIGHT PANEL: OUTPUT ─────────────────── */}
-          <div style={{overflow:'auto',padding:20,display:'flex',flexDirection:'column',gap:20}}>
+          <div style={{flex:1,overflow:'auto',padding:12,display:'flex',flexDirection:'column',gap:12}}>
 
-            {/* Model prices row */}
-            <div style={{display:'flex',gap:12}}>
-              <ModelPriceCard
-                model="BLACK-SCHOLES · ANALYTICAL"
-                price={bsP}
-                color={C.bs}
-                formula={type==='call'?"C = S·e^(−qT)·N(d₁) − K·e^(−rT)·N(d₂)":"P = K·e^(−rT)·N(−d₂) − S·e^(−qT)·N(−d₁)"}
-                detail="Closed-form · Machine precision · European only"
-              />
-              <ModelPriceCard
-                model="BINOMIAL TREE · CRR · 150 STEPS"
-                price={binEuro.price}
-                error={binEuro.price-bsP}
-                color={C.binom}
-                formula="V = e^(−rΔt)[p·Vᵤ + (1−p)·Vd]"
-                extra={eep>0?`American: $${binAmer.price.toFixed(4)}  (EEP: +$${eep.toFixed(4)})`:`American: $${binAmer.price.toFixed(4)}`}
-                detail="Backward induction · American exercise · Converges to BS"
-              />
-              <ModelPriceCard
-                model="MONTE CARLO · ANTITHETIC · 30K"
-                price={mc.price}
-                error={mc.price-bsP}
-                se={mc.se}
-                ci={mc.ci}
-                color={C.mc}
-                formula="S_T = S·exp[(r−q−½σ²)T + σ√T·Z]"
-                detail="GBM exact solution · Var reduction · Path-dependent ready"
-              />
-            </div>
+            {activeTab==='chain' && (
+              <>
+                {cErr ? <ErrorMsg msg={cErr}/> : <OptionsChainTable chainData={chain} spot={quote?.price}/>}
+                {quote && (
+                  <PayoffChart
+                    S={quote.price} K={quote.price} T={45/365}
+                    r={quote.risk_free_rate} sigma={quote.hist_vol_30d}
+                    q={quote.dividend_yield} type="call"
+                    price={bsCalc(quote.price,quote.price,45/365,quote.risk_free_rate,quote.hist_vol_30d,quote.dividend_yield,'call').price}
+                  />
+                )}
+              </>
+            )}
 
-            {/* Greeks row */}
-            <div>
-              <div style={{fontFamily:fontMono,fontSize:9,color:C.muted,letterSpacing:3,marginBottom:10}}>
-                GREEKS — BLACK-SCHOLES ANALYTICAL
-              </div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:10}}>
-                <GreekCard symbol="Δ" name="DELTA" value={bsG.delta} color={C.bs}
-                  desc={`Hedge ratio. Δ≈${bsG.delta.toFixed(2)} shares per option. ${type==='call'?'[0,1]':'[−1,0]'}`}/>
-                <GreekCard symbol="Γ" name="GAMMA" value={bsG.gamma} color={C.binom}
-                  desc="Rate of Δ change per $1 spot move. Same for calls & puts."/>
-                <GreekCard symbol="ν" name="VEGA" value={bsG.vega} color={C.mc}
-                  desc="Price change per 1% vol move. Always positive for long options."/>
-                <GreekCard symbol="Θ" name="THETA" value={bsG.theta} color={C.put}
-                  desc={`Daily decay: $${Math.abs(bsG.theta).toFixed(4)}/day. Enemy of option buyers.`}/>
-                <GreekCard symbol="ρ" name="RHO" value={bsG.rho} color={C.amer}
-                  desc={`Rate sensitivity per 1% rate move. ${type==='call'?'Positive':'Negative'} for ${type}s.`}/>
-              </div>
-            </div>
+            {activeTab==='alpha' && (
+              mpErr ? <ErrorMsg msg={mpErr}/> :
+              <MispricingChart compareData={compare} spot={quote?.price}/>
+            )}
 
-            {/* Charts grid */}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
-              <div style={{background:C.panel,border:`1px solid ${C.border}`,padding:16}}>
-                <PayoffChart S={S} K={K} T={Ty} r={ry} sigma={sy} q={qy}
-                  type={type} bsP={bsP} binomP={binEuro.price} mcP={mc.price}/>
-              </div>
-              <div style={{background:C.panel,border:`1px solid ${C.border}`,padding:16}}>
-                <GreeksChart S={S} K={K} T={Ty} r={ry} sigma={sy} q={qy} type={type}/>
-              </div>
-              <div style={{background:C.panel,border:`1px solid ${C.border}`,padding:16}}>
-                <ConvergenceChart S={S} K={K} T={Ty} r={ry} sigma={sy} q={qy} type={type}/>
-              </div>
-              <div style={{background:C.panel,border:`1px solid ${C.border}`,padding:16}}>
-                <VolSmileChart S={S} T={Ty} r={ry} q={qy} type={type}/>
-              </div>
-            </div>
-
-            {/* Live formula panel */}
-            <FormulaPanel d1={d1} d2={d2} S={S} K={K} T={Ty} r={ry} sigma={sy} q={qy} type={type}/>
+            {activeTab==='smile' && (
+              cErr ? <ErrorMsg msg={cErr}/> :
+              <IVSmileChart chainData={chain}/>
+            )}
 
           </div>
         </div>
