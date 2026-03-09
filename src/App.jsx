@@ -8,7 +8,7 @@ import {
 /* ============================================================
    CONSTANTS & THEME
    ============================================================ */
-const API = "http://localhost:8000";
+const API = "https://optionval-api.onrender.com";
 
 const C = {
   bg:       '#060a0f',
