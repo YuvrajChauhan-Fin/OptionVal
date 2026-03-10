@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   AreaChart, Area, LineChart, Line, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid, Tooltip,
@@ -327,7 +327,7 @@ function QuoteStrip({q,loading,onRetry}){
         ['30D HIST VOL',`${(q.hist_vol_30d*100).toFixed(1)}%`,D.orange,TIPS.iv],
         ['RISK-FREE r',`${(q.risk_free_rate*100).toFixed(2)}%`,D.t1,null],
         ['DIV YIELD q',`${(q.dividend_yield*100).toFixed(2)}%`,D.t1,null],
-        ['MKT CAP',q.market_cap>1e12?`$${(q.market_cap/1e12).toFixed(2)}T`:q.market_cap>1e9?`$${(q.market_cap/1e9).toFixed(1)}B`:'—',D.t0,null],
+        ['MKT CAP',(()=>{const mc=q.market_cap;if(!mc||mc===0)return'N/A';if(mc>=1e12)return`$${(mc/1e12).toFixed(2)}T`;if(mc>=1e9)return`$${(mc/1e9).toFixed(1)}B`;if(mc>=1e6)return`$${(mc/1e6).toFixed(0)}M`;return`$${mc.toLocaleString()}`;})(),D.t0,null],
         ['SECTOR',q.sector||'—',D.t1,null],
       ].map(([k,v,c,tip])=>(
         <div key={k} style={{padding:'0 18px',display:'flex',flexDirection:'column',justifyContent:'center',borderRight:`1px solid ${D.b0}`}}>
@@ -449,6 +449,25 @@ function VolHeatmap({data}){
 }
 
 /* ═══════════════════════════════════════════════════
+   ERROR BOUNDARY — prevents chart crash from white-screening the app
+═══════════════════════════════════════════════════ */
+class ErrorBoundary extends React.Component {
+  constructor(props){super(props);this.state={hasError:false,error:null};}
+  static getDerivedStateFromError(error){return{hasError:true,error};}
+  render(){
+    if(this.state.hasError){
+      return(
+        <div style={{padding:'40px',color:'#ff6b6b',fontFamily:'"JetBrains Mono","Fira Code","Consolas",monospace'}}>
+          <p>⚠ Chart render error: {this.state.error?.message}</p>
+          <p style={{color:'#666',fontSize:'12px'}}>Try selecting a different expiry with more time remaining.</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+/* ═══════════════════════════════════════════════════
    VOL SURFACE PANEL
 ═══════════════════════════════════════════════════ */
 function VolSurfacePanel({ticker}){
@@ -457,6 +476,19 @@ function VolSurfacePanel({ticker}){
   if(loading)return <Spin label="FETCHING ALL EXPIRIES — BUILDING SURFACE"/>;
   if(error)return <Err msg={error}/>;
   if(!data)return null;
+
+  // Guard: empty after near-expiry filtering (backend sets surface=[] with message field)
+  const validPoints=(data.surface||[]).filter(p=>p.days>0&&p.T>=0.003);
+  if(validPoints.length===0){
+    return(
+      <div style={{padding:'40px',textAlign:'center',fontFamily:D.MONO||'"JetBrains Mono",monospace'}}>
+        <p style={{color:D.amber,fontSize:13}}>Vol Surface requires options with more than 1 day to expiry.</p>
+        <p style={{color:D.t3,fontSize:11}}>Select a later expiry to view the surface.</p>
+        {data.message&&<p style={{color:D.t4,fontSize:10,marginTop:8}}>{data.message}</p>}
+      </div>
+    );
+  }
+
   const ivFlat=(data.iv_grid||[[]]).flat().filter(Boolean);
   const ivMin=ivFlat.length?Math.min(...ivFlat).toFixed(1):'—';
   const ivMax=ivFlat.length?Math.max(...ivFlat).toFixed(1):'—';
@@ -482,7 +514,9 @@ function VolSurfacePanel({ticker}){
       </div>
       <CtxBar text="Strike (x) × Expiry (y) × Implied Vol (colour). Drag to rotate in 3D. A flat surface = BS is correct. The skew you see — OTM puts higher than OTM calls — is the market pricing crash risk that BS ignores." color={D.orange}/>
       <div style={{background:D.s2,border:`1px solid ${D.b1}`,overflow:'hidden'}}>
-        {mode==='3d'?<VolSurface3D data={data}/>:<VolHeatmap data={data}/>}
+        <ErrorBoundary>
+          {mode==='3d'?<VolSurface3D data={data}/>:<VolHeatmap data={data}/>}
+        </ErrorBoundary>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:1,background:D.b0}}>
         {[
@@ -717,6 +751,13 @@ function Methodology(){
 /* ═══════════════════════════════════════════════════
    MODEL PRICER (Left Panel)
 ═══════════════════════════════════════════════════ */
+function computeFreshT(expiryStr){
+  // Options expire at 4:00 PM Eastern — use 21:00 UTC as conservative estimate
+  const[year,month,day]=expiryStr.split('-').map(Number);
+  const expiry=new Date(Date.UTC(year,month-1,day,21,0,0));
+  return Math.max((expiry-Date.now())/(365.25*24*60*60*1000),0.0001);
+}
+
 function ModelPricer({defaultS,defaultR,defaultQ,selectedContract,onLoad}){
   const[S,setS]=useState(defaultS||185);
   const[K,setK]=useState(defaultS||185);
@@ -729,7 +770,21 @@ function ModelPricer({defaultS,defaultR,defaultQ,selectedContract,onLoad}){
   const[tab,setTab]=useState('greeks');
 
   useEffect(()=>{if(defaultS){setS(parseFloat(defaultS.toFixed(2)));setK(parseFloat(defaultS.toFixed(2)));}if(defaultR)setR(parseFloat((defaultR*100).toFixed(3)));if(defaultQ)setQ(parseFloat((defaultQ*100).toFixed(3)));},[defaultS,defaultR,defaultQ]);
-  useEffect(()=>{if(!selectedContract)return;setK(selectedContract.strike);setType(selectedContract.type);if(selectedContract.T)setTd(Math.round(selectedContract.T*365));},[selectedContract]);
+  useEffect(()=>{
+    if(!selectedContract)return;
+    setK(selectedContract.strike);
+    setType(selectedContract.type);
+    if(selectedContract.expiry){
+      // Recompute T fresh from current time — avoids stale T causing $0.0000 prices/Greeks
+      const freshT=computeFreshT(selectedContract.expiry);
+      setTd(Math.max(Math.round(freshT*365),1));
+    }else if(selectedContract.T){
+      setTd(Math.round(selectedContract.T*365));
+    }
+  },[selectedContract]);
+
+  const renderFreshT=selectedContract?.expiry?computeFreshT(selectedContract.expiry):null;
+  const nearExpiry=renderFreshT!=null&&renderFreshT<0.001;
 
   const Ty=Td/365,ry=r/100,sy=σ/100,qy=q/100;
   const bsR=bs(S,K,Ty,ry,sy,qy,type);
@@ -774,6 +829,7 @@ function ModelPricer({defaultS,defaultR,defaultQ,selectedContract,onLoad}){
             ?`K=$${selectedContract.strike} · ${selectedContract.expiry} · ${selectedContract.type?.toUpperCase()}`
             :'Click any row in the Options Chain →'}
         </div>
+        {nearExpiry&&<span style={{fontFamily:MONO,color:D.amber,fontSize:10,marginTop:4,display:'block'}}>⚠ NEAR EXPIRY — Greeks unreliable</span>}
       </div>
 
       <div style={{flex:1,overflowY:'auto',padding:16}}>
@@ -1106,6 +1162,7 @@ function IVSmile({data,loading,error,ticker}){
   if(!data)return null;
   const calls=data.calls.filter(c=>c.iv!=null).map(c=>({strike:c.strike,iv:c.iv}));
   const puts=data.puts.filter(c=>c.iv!=null).map(c=>({strike:c.strike,iv:c.iv}));
+  const hasIVData=calls.length>0||puts.length>0;
   return(
     <div style={{padding:20,display:'flex',flexDirection:'column',gap:16}}>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
@@ -1118,6 +1175,20 @@ function IVSmile({data,loading,error,ticker}){
         <Badge color={D.orange} size={9}>LIVE IV</Badge>
       </div>
       <CtxBar text="Each dot = one live contract. The smile/skew shows OTM puts pricing higher IV than OTM calls — crash risk premium. A flat line = BS is correct. Reality never is." color={D.orange}/>
+      {!hasIVData?(
+        <div style={{padding:'32px',background:`${D.amber}0a`,border:`1px solid ${D.amber}25`,fontFamily:MONO}}>
+          <p style={{color:D.amber,margin:'0 0 8px 0',fontSize:11}}>⚠ THEORETICAL MODE — No market quotes available</p>
+          <p style={{color:'#888',fontSize:10,margin:'0 0 4px 0',lineHeight:1.8}}>
+            IV Smile requires live bid/ask quotes to compute implied volatility per strike.
+            The free tier provides theoretical BS pricing only.
+          </p>
+          <p style={{color:'#888',fontSize:10,margin:'16px 0 0 0',lineHeight:1.8}}>
+            In a live market, the smile would show OTM puts priced at higher IV than
+            OTM calls — the crash risk premium that flat-vol Black-Scholes cannot capture.
+            This skew is the foundation of local vol and stochastic vol models.
+          </p>
+        </div>
+      ):(
       <ResponsiveContainer width="100%" height={300}>
         <ScatterChart margin={{top:10,right:30,left:0,bottom:25}}>
           <CartesianGrid stroke={D.b0} strokeDasharray="2 4" opacity={0.4}/>
@@ -1131,6 +1202,7 @@ function IVSmile({data,loading,error,ticker}){
           <Legend wrapperStyle={{fontFamily:MONO,fontSize:10,paddingTop:12}}/>
         </ScatterChart>
       </ResponsiveContainer>
+      )}
       <div style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${D.orange}`}}>
         <div style={{fontFamily:MONO,fontSize:10,color:D.t2,lineHeight:2}}>
           <strong style={{color:D.t0}}>The skew:</strong> OTM puts price higher IV because institutional hedgers buy downside protection — crash risk is asymmetric. BS assumes one flat σ. This chart shows exactly where that assumption breaks down.
@@ -1271,7 +1343,8 @@ export default function App(){
             {TABS.map(t=>(
               <button key={t.id} onClick={()=>setTab(t.id)} style={{
                 padding:'0 18px',cursor:'pointer',fontFamily:MONO,fontSize:9,letterSpacing:1.5,
-                background:'transparent',border:'none',
+                background:'transparent',
+                borderTop:'none',borderLeft:'none',borderRight:'none',
                 borderBottom:tab===t.id?`2px solid ${t.color}`:'2px solid transparent',
                 color:tab===t.id?t.color:D.t3,display:'flex',alignItems:'center',gap:6,
               }}>
