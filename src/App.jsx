@@ -4,7 +4,6 @@ import {
   XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, Legend
 } from "recharts";
-import * as THREE from "three";
 
 /* ═══════════════════════════════════════════════════
    CONFIG
@@ -190,8 +189,8 @@ function NumInput({label,val,set,min,max,step,fmt,color=D.cyan}){
         {editing?(
           <input autoFocus value={raw}
             onChange={e=>setRaw(e.target.value)}
-            onBlur={()=>commit(raw)}
-            onKeyDown={e=>{if(e.key==='Enter')commit(raw);if(e.key==='Escape')setEditing(false);}}
+            onBlur={e=>commit(e.target.value)}
+            onKeyDown={e=>{if(e.key==='Enter')commit(e.target.value);if(e.key==='Escape')setEditing(false);}}
             style={{fontFamily:MONO,fontSize:12,color:color,background:D.s3,
               border:`1px solid ${color}`,padding:'2px 8px',width:90,textAlign:'right',outline:'none'}}/>
         ):(
@@ -341,67 +340,6 @@ function QuoteStrip({q,loading,onRetry}){
   );
 }
 
-/* ═══════════════════════════════════════════════════
-   3D VOL SURFACE
-═══════════════════════════════════════════════════ */
-function VolSurface3D({data}){
-  const ref=useRef(null);const frameRef=useRef(null);
-  useEffect(()=>{
-    if(!data||!ref.current)return;
-    const w=ref.current.clientWidth,h=440;
-    const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
-    renderer.setSize(w,h);renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
-    renderer.setClearColor(0x000000,0);
-    ref.current.innerHTML='';ref.current.appendChild(renderer.domElement);
-    const scene=new THREE.Scene();
-    const camera=new THREE.PerspectiveCamera(45,w/h,0.1,1000);
-    camera.position.set(2.2,1.6,2.2);camera.lookAt(0,0.3,0);
-    const{expiries=[],strikes=[],iv_grid=[]}=data;
-    if(!expiries.length||!strikes.length)return;
-    const nx=strikes.length,ny=expiries.length;
-    const geo=new THREE.BufferGeometry();
-    const positions=[],colors=[],indices=[];
-    const ivFlat=iv_grid.flat().filter(v=>v&&!isNaN(v));
-    const ivMin=Math.min(...ivFlat),ivMax=Math.max(...ivFlat);
-    function ivCol(iv){
-      const t=Math.max(0,Math.min(1,(iv-ivMin)/(ivMax-ivMin||1)));
-      if(t<0.3){const s=t/0.3;return new THREE.Color(0.05+s*.1,0.2+s*.5,0.7+s*.2);}
-      if(t<0.6){const s=(t-.3)/.3;return new THREE.Color(.15+s*.4,.7-s*.2,.9-s*.6);}
-      const s=(t-.6)/.4;return new THREE.Color(.55+s*.4,.5-s*.45,.3-s*.25);
-    }
-    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){
-      const x=(i/(nx-1)-.5)*2,z=(j/(ny-1)-.5)*2;
-      const iv=iv_grid[j]&&iv_grid[j][i]!=null?iv_grid[j][i]:ivMin;
-      const y=(iv-ivMin)/(ivMax-ivMin||1)*1.2;
-      positions.push(x,y,z);const c=ivCol(iv);colors.push(c.r,c.g,c.b);
-    }
-    for(let j=0;j<ny-1;j++)for(let i=0;i<nx-1;i++){const a=j*nx+i,b=a+1,c=a+nx,d=c+1;indices.push(a,b,c,b,d,c);}
-    geo.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));
-    geo.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));
-    geo.setIndex(indices);geo.computeVertexNormals();
-    const mesh=new THREE.Mesh(geo,new THREE.MeshPhongMaterial({vertexColors:true,side:THREE.DoubleSide,shininess:30,opacity:.93,transparent:true}));
-    scene.add(mesh);
-    scene.add(new THREE.Mesh(geo,new THREE.MeshBasicMaterial({color:0xffffff,wireframe:true,opacity:.05,transparent:true})));
-    scene.add(Object.assign(new THREE.AmbientLight(0xffffff,.5)));
-    const dl=new THREE.DirectionalLight(0xaaccff,1.2);dl.position.set(2,3,2);scene.add(dl);
-    scene.add(Object.assign(new THREE.DirectionalLight(0xff8844,.3),{position:new THREE.Vector3(-2,-1,-2)}));
-    let rY=0,rX=.35,isDrag=false,lx=0,ly=0;
-    const onD=e=>{isDrag=true;lx=e.clientX||e.touches?.[0]?.clientX||0;ly=e.clientY||e.touches?.[0]?.clientY||0;};
-    const onU=()=>isDrag=false;
-    const onM=e=>{if(!isDrag)return;const cx=e.clientX||e.touches?.[0]?.clientX||0,cy=e.clientY||e.touches?.[0]?.clientY||0;rY+=(cx-lx)*.012;rX+=(cy-ly)*.006;lx=cx;ly=cy;};
-    renderer.domElement.addEventListener('mousedown',onD);renderer.domElement.addEventListener('touchstart',onD);
-    window.addEventListener('mouseup',onU);window.addEventListener('touchend',onU);
-    window.addEventListener('mousemove',onM);window.addEventListener('touchmove',onM);
-    const animate=()=>{frameRef.current=requestAnimationFrame(animate);if(!isDrag)rY+=.003;
-      scene.children.filter(c=>c.isMesh).forEach(m=>{m.rotation.y=rY;m.rotation.x=rX;});
-      renderer.render(scene,camera);};
-    animate();
-    return()=>{cancelAnimationFrame(frameRef.current);renderer.dispose();
-      window.removeEventListener('mouseup',onU);window.removeEventListener('mousemove',onM);
-      window.removeEventListener('touchend',onU);window.removeEventListener('touchmove',onM);};
-  },[data]);
-  return <div ref={ref} style={{width:'100%',height:440,cursor:'grab'}}/>;
-}
 
 function VolHeatmap({data}){
   const ref=useRef(null);
@@ -472,7 +410,7 @@ class ErrorBoundary extends React.Component {
 ═══════════════════════════════════════════════════ */
 function VolSurfacePanel({ticker}){
   const{data,loading,error}=useFetch(ticker?`${API}/api/surface/${ticker}`:null);
-  const[mode,setMode]=useState('3d');
+  const[mode,setMode]=useState('heatmap');
   if(loading)return <Spin label="FETCHING ALL EXPIRIES — BUILDING SURFACE"/>;
   if(error)return <Err msg={error}/>;
   if(!data)return null;
@@ -504,7 +442,7 @@ function VolSurfacePanel({ticker}){
           </div>
         </div>
         <div style={{display:'flex',gap:2}}>
-          {[['3d','⬡ 3D'],['heatmap','⊞ HEATMAP']].map(([id,label])=>(
+          {[['heatmap','⊞ HEATMAP']].map(([id,label])=>(
             <button key={id} onClick={()=>setMode(id)} style={{
               fontFamily:MONO,fontSize:9,padding:'7px 14px',cursor:'pointer',letterSpacing:1,
               background:mode===id?D.orange:`transparent`,border:`1px solid ${mode===id?D.orange:D.b2}`,
@@ -512,10 +450,10 @@ function VolSurfacePanel({ticker}){
           ))}
         </div>
       </div>
-      <CtxBar text="Strike (x) × Expiry (y) × Implied Vol (colour). Drag to rotate in 3D. A flat surface = BS is correct. The skew you see — OTM puts higher than OTM calls — is the market pricing crash risk that BS ignores." color={D.orange}/>
+      <CtxBar text="Strike (x) × Expiry (y) × Implied Vol (colour). A flat surface = BS is correct. The skew you see — OTM puts higher than OTM calls — is the market pricing crash risk that BS ignores." color={D.orange}/>
       <div style={{background:D.s2,border:`1px solid ${D.b1}`,overflow:'hidden'}}>
         <ErrorBoundary>
-          {mode==='3d'?<VolSurface3D data={data}/>:<VolHeatmap data={data}/>}
+          <VolHeatmap data={data}/>
         </ErrorBoundary>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:1,background:D.b0}}>
@@ -784,7 +722,7 @@ function ModelPricer({defaultS,defaultR,defaultQ,selectedContract,onLoad}){
   },[selectedContract]);
 
   const renderFreshT=selectedContract?.expiry?computeFreshT(selectedContract.expiry):null;
-  const nearExpiry=renderFreshT!=null&&renderFreshT<0.001;
+  const nearExpiry=renderFreshT!=null&&renderFreshT<0.003;
 
   const Ty=Td/365,ry=r/100,sy=σ/100,qy=q/100;
   const bsR=bs(S,K,Ty,ry,sy,qy,type);
@@ -829,7 +767,7 @@ function ModelPricer({defaultS,defaultR,defaultQ,selectedContract,onLoad}){
             ?`K=$${selectedContract.strike} · ${selectedContract.expiry} · ${selectedContract.type?.toUpperCase()}`
             :'Click any row in the Options Chain →'}
         </div>
-        {nearExpiry&&<span style={{fontFamily:MONO,color:D.amber,fontSize:10,marginTop:4,display:'block'}}>⚠ NEAR EXPIRY — Greeks unreliable</span>}
+        {nearExpiry&&(<span style={{fontSize:10,color:D.amber,border:`1px solid ${D.amber}`,padding:'2px 6px',marginLeft:'8px',fontFamily:MONO,display:'inline-block',marginTop:4}}>⚠ EXPIRING TODAY — Greeks unreliable</span>)}
       </div>
 
       <div style={{flex:1,overflowY:'auto',padding:16}}>
