@@ -162,7 +162,7 @@ function Err({msg,retry}){
     background:`${D.red}0c`,border:`1px solid ${D.red}28`,lineHeight:1.8}}>
     <div style={{marginBottom:6}}>⚠ {msgStr}</div>
     {msg?.includes('Too Many Requests')&&(
-      <div style={{color:D.t2,fontSize:9}}>Yahoo Finance rate limit hit. Wait 30s and try again, or try a different ticker (AAPL, MSFT, TSLA).</div>
+      <div style={{color:D.t2,fontSize:9}}>Data unavailable. Try again in a moment, or try a different ticker (AAPL, MSFT, TSLA).</div>
     )}
     {retry&&<button onClick={retry} style={{marginTop:8,fontFamily:MONO,fontSize:9,padding:'4px 12px',
       background:`${D.cyan}15`,border:`1px solid ${D.cyan}40`,color:D.cyan,cursor:'pointer'}}>↺ RETRY</button>}
@@ -523,7 +523,7 @@ function Methodology(){
       <Section color={D.cyan} label="01 · OVERVIEW">
         <div style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${D.cyan}`}}>
           <div style={{fontFamily:MONO,fontSize:11,color:D.t1,lineHeight:2,marginBottom:10}}>
-            OptionVal is a full-stack options valuation engine. Live market data flows from Yahoo Finance through a FastAPI backend into a React frontend where three pricing models run entirely client-side — no round-trips needed for model prices.
+            OptionVal is a full-stack options valuation engine. Live market data flows from the Massive.com REST API through a FastAPI backend into a React frontend where three pricing models run entirely client-side — no round-trips needed for model prices.
           </div>
           <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:1,background:D.b0}}>
             {[
@@ -545,7 +545,7 @@ function Methodology(){
         <div style={{display:'flex',flexDirection:'column',gap:6}}>
           {[
             {badge:'🟢 LIVE',color:D.green,title:'Market Quotes & Options Chain',
-              desc:'Spot price, bid/ask, volume, open interest — fetched from Yahoo Finance via yfinance. Options chains include all available expiries. Data is cached server-side for 5 minutes to respect rate limits.'},
+              desc:'Stock price, OHLC, volume, and 30-day historical volatility fetched from Massive.com REST API (real-time snapshot + daily bars). Option strikes and expiry dates sourced from Massive.com options reference contracts. Data is cached server-side (60s for quotes, 45s for chains).'},
             {badge:'🟡 THEORETICAL',color:D.amber,title:'Model Prices (BS / Binomial / MC)',
               desc:'Black-Scholes, Binomial CRR, and Monte Carlo prices are computed client-side in real time using the live spot, implied volatility, risk-free rate and time to expiry. They are not sourced from any exchange.'},
             {badge:'⚪ NOT AVAILABLE',color:D.t4,title:'Real-Time Tick Data · Level II Order Book',
@@ -652,7 +652,7 @@ function Methodology(){
             <div style={{fontFamily:MONO,fontSize:9,color:D.red,letterSpacing:2,marginBottom:10}}>CURRENT LIMITATIONS</div>
             <ul style={{margin:0,paddingLeft:16}}>
               {[
-                'Yahoo Finance data is delayed ~15 min and subject to rate limits',
+                'Massive.com data is based on previous-day close (end-of-day snapshot)',
                 'Black-Scholes assumes constant vol — the skew shows this is wrong',
                 'No path-dependent payoffs (barrier, Asian, lookback) in live chain',
                 'IV solver returns null for deep OTM / very short-dated options where Newton-Raphson diverges',
@@ -698,7 +698,7 @@ function Methodology(){
           <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8}}>
             {[
               ['Python Engine','Black-Scholes · Binomial CRR · Monte Carlo · Newton-Raphson IV solver · math.erf norm_cdf (no scipy)'],
-              ['FastAPI Backend','yfinance fast_info + custom session · 5-min cache · layered fallbacks · full error logging'],
+              ['FastAPI Backend','Massive.com REST API · reference contracts endpoint · 60s quote cache · 45s chain cache · full error logging'],
               ['React Frontend','Client-side BS engine · Three.js vol surface · Recharts · Deployed on Vercel'],
             ].map(([k,v])=>(
               <div key={k} style={{padding:'10px 14px',background:D.s3}}>
@@ -1247,7 +1247,7 @@ export default function App(){
         background:D.s1,borderBottom:`1px solid ${D.b0}`,flexShrink:0,flexWrap:'wrap'}}>
         <span style={{fontFamily:MONO,fontSize:7,color:D.t4,letterSpacing:2,marginRight:4}}>DATA</span>
         {[
-          {dot:'🟢',label:'LIVE',desc:'Market prices, IV & chain from Yahoo Finance'},
+          {dot:'🟢',label:'LIVE',desc:'Stock quotes & option reference contracts from Massive.com REST API'},
           {dot:'🟡',label:'THEORETICAL',desc:'BS / Binomial / Monte Carlo model prices'},
           {dot:'⚪',label:'REQUIRES SUBSCRIPTION',desc:'Level II order book · real-time tick data'},
         ].map(({dot,label,desc})=>(
