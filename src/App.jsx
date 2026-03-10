@@ -69,8 +69,8 @@ function useFetch(url){
     ctrl.current?.abort();ctrl.current=new AbortController();
     setL(true);setE(null);
     fetch(url,{signal:ctrl.current.signal})
-      .then(r=>r.ok?r.json():r.json().then(e=>{throw new Error(e.detail||'API error')}))
-      .then(d=>{fetchCache.set(url,d);setD(d);setL(false);})
+      .then(r=>r.ok?r.json():r.json().then(e=>{const msg=typeof e.detail==='object'?JSON.stringify(e.detail):(e.detail||'API error');throw new Error(msg);}))
+      .then(d=>{console.log('API response:',url,d);if(d?.detail)console.log('API error detail:',d.detail);fetchCache.set(url,d);setD(d);setL(false);})
       .catch(e=>{if(e.name!=='AbortError'){setE(e.message);setL(false);}});
     return()=>ctrl.current?.abort();
   },[url]);
@@ -157,9 +157,10 @@ function Spin({label='LOADING'}){
   </div>;
 }
 function Err({msg,retry}){
+  const msgStr=typeof msg==='object'?JSON.stringify(msg):msg;
   return <div style={{margin:16,padding:'14px 18px',fontFamily:MONO,fontSize:10,color:D.red,
     background:`${D.red}0c`,border:`1px solid ${D.red}28`,lineHeight:1.8}}>
-    <div style={{marginBottom:6}}>⚠ {msg}</div>
+    <div style={{marginBottom:6}}>⚠ {msgStr}</div>
     {msg?.includes('Too Many Requests')&&(
       <div style={{color:D.t2,fontSize:9}}>Yahoo Finance rate limit hit. Wait 30s and try again, or try a different ticker (AAPL, MSFT, TSLA).</div>
     )}
@@ -847,6 +848,7 @@ function ChainTable({chainData,loading,error,spot,expiry,setExpiry,onSelect}){
       <div style={{fontFamily:MONO,fontSize:10,color:D.t4}}>Try: AAPL · TSLA · NVDA · MSFT · SPY</div>
     </div>
   );
+  if(!chainData?.calls||!chainData?.puts)return <Err msg={`Unexpected response shape: ${JSON.stringify(chainData).slice(0,200)}`}/>;
   const contracts=(side==='calls'?chainData.calls:chainData.puts)||[];
   const sorted=[...contracts].sort((a,b)=>(a[sortKey]>b[sortKey]?1:-1)*sortDir);
   const cols=[
