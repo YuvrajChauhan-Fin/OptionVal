@@ -510,66 +510,206 @@ function VolSurfacePanel({ticker}){
    METHODOLOGY PANEL
 ═══════════════════════════════════════════════════ */
 function Methodology(){
+  const Section=({color=D.t3,label,children})=>(
+    <div style={{marginBottom:4}}>
+      <div style={{fontFamily:MONO,fontSize:8,color,letterSpacing:3,marginBottom:10,paddingBottom:6,borderBottom:`1px solid ${D.b1}`}}>{label}</div>
+      {children}
+    </div>
+  );
   return(
-    <div style={{padding:24,display:'flex',flexDirection:'column',gap:20,maxWidth:900}}>
-      <div>
-        <div style={{fontFamily:MONO,fontSize:9,color:D.t3,letterSpacing:3,marginBottom:6}}>METHODOLOGY & VALIDATION</div>
-        <div style={{fontFamily:MONO,fontSize:12,color:D.t1,lineHeight:1.5}}>How this engine was built — and how we know it's correct.</div>
-      </div>
-      {/* Validation */}
-      <div style={{padding:'16px 18px',background:`${D.green}0c`,border:`1px solid ${D.green}28`,borderLeft:`3px solid ${D.green}`}}>
-        <div style={{fontFamily:MONO,fontSize:9,color:D.green,letterSpacing:2,marginBottom:10}}>✓ VALIDATED RESULTS</div>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+    <div style={{padding:24,display:'flex',flexDirection:'column',gap:24,maxWidth:960,overflowY:'auto'}}>
+
+      {/* ── OVERVIEW ── */}
+      <Section color={D.cyan} label="01 · OVERVIEW">
+        <div style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${D.cyan}`}}>
+          <div style={{fontFamily:MONO,fontSize:11,color:D.t1,lineHeight:2,marginBottom:10}}>
+            OptionVal is a full-stack options valuation engine. Live market data flows from Yahoo Finance through a FastAPI backend into a React frontend where three pricing models run entirely client-side — no round-trips needed for model prices.
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:1,background:D.b0}}>
+            {[
+              ['ARCHITECTURE','FastAPI (Python) · React · Vercel · Render'],
+              ['MODELS','Black-Scholes · Binomial CRR · Monte Carlo GBM'],
+              ['IV SOLVER','Newton-Raphson · Brenner-Subrahmanyam seed'],
+            ].map(([k,v])=>(
+              <div key={k} style={{background:D.s2,padding:'10px 14px'}}>
+                <div style={{fontFamily:MONO,fontSize:8,color:D.t4,letterSpacing:2,marginBottom:4}}>{k}</div>
+                <div style={{fontFamily:MONO,fontSize:9,color:D.t2,lineHeight:1.7}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Section>
+
+      {/* ── DATA SOURCES ── */}
+      <Section color={D.green} label="02 · DATA SOURCES">
+        <div style={{display:'flex',flexDirection:'column',gap:6}}>
           {[
-            ['Hull Example 19.1','Reproduced to 4 decimal places — S=$42, K=$40, T=0.5yr, r=10%, σ=20%'],
-            ['Put-Call Parity','Error: 3.55×10⁻¹⁵ — essentially machine precision'],
-            ['IV Round-Trip','Solve IV from BS price, reprice — error: 1.13×10⁻¹¹'],
-            ['Binomial Convergence','150-step CRR converges to BS within 0.01% for European options'],
-          ].map(([k,v])=>(
-            <div key={k} style={{padding:'10px 14px',background:D.s2}}>
-              <div style={{fontFamily:MONO,fontSize:9,color:D.green,marginBottom:3}}>{k}</div>
-              <div style={{fontFamily:MONO,fontSize:9,color:D.t2,lineHeight:1.6}}>{v}</div>
+            {badge:'🟢 LIVE',color:D.green,title:'Market Quotes & Options Chain',
+              desc:'Spot price, bid/ask, volume, open interest — fetched from Yahoo Finance via yfinance. Options chains include all available expiries. Data is cached server-side for 5 minutes to respect rate limits.'},
+            {badge:'🟡 THEORETICAL',color:D.amber,title:'Model Prices (BS / Binomial / MC)',
+              desc:'Black-Scholes, Binomial CRR, and Monte Carlo prices are computed client-side in real time using the live spot, implied volatility, risk-free rate and time to expiry. They are not sourced from any exchange.'},
+            {badge:'⚪ NOT AVAILABLE',color:D.t4,title:'Real-Time Tick Data · Level II Order Book',
+              desc:'Intraday tick data and full order book depth require paid exchange subscriptions (Bloomberg Terminal, Refinitiv, CBOE DataShop). This engine uses free end-of-day / delayed quotes only.'},
+          ].map(({badge,color,title,desc})=>(
+            <div key={title} style={{padding:'12px 16px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${color}`,display:'flex',gap:14,alignItems:'flex-start'}}>
+              <span style={{fontFamily:MONO,fontSize:8,color,background:`${color}12`,padding:'3px 8px',whiteSpace:'nowrap',marginTop:1,letterSpacing:1}}>{badge}</span>
+              <div>
+                <div style={{fontFamily:MONO,fontSize:10,color:D.t1,marginBottom:4,fontWeight:600}}>{title}</div>
+                <div style={{fontFamily:MONO,fontSize:9,color:D.t3,lineHeight:1.8}}>{desc}</div>
+              </div>
             </div>
           ))}
         </div>
-      </div>
-      {/* Models */}
-      {[
-        {color:D.mBS,label:'BLACK-SCHOLES-MERTON (1973)',ref:'Black, F. & Scholes, M. (1973). The Pricing of Options and Corporate Liabilities. JPE. · Nobel Prize 1997.',
-          formula:'C = S·e^(−qT)·N(d₁) − K·e^(−rT)·N(d₂)',
-          points:['Closed-form analytical solution — exact for European options','Assumes constant volatility, continuous trading, no dividends (extended by Merton for q)','Greeks derived analytically — Delta, Gamma, Vega, Theta, Rho','Limitation: assumes flat vol surface — the skew shows this is wrong']},
-        {color:D.mBinom,label:'COX-ROSS-RUBINSTEIN BINOMIAL TREE (1979)',ref:'Cox, J., Ross, S., Rubinstein, M. (1979). Option Pricing: A Simplified Approach. JFE.',
-          formula:'u = e^(σ√Δt), d = 1/u, p = (e^((r−q)Δt) − d)/(u − d)',
-          points:['Discrete lattice model — 150 steps in this implementation','Supports American early exercise at each node','Converges to BS as steps → ∞ for European options','American premium = Binomial price − BS price when positive']},
-        {color:D.mMC,label:'MONTE CARLO SIMULATION (Boyle 1977)',ref:'Boyle, P. (1977). Options: A Monte Carlo Approach. JFE.',
-          formula:'S(T) = S₀·exp((r − q − σ²/2)T + σ√T·Z), Z ~ N(0,1)',
-          points:['20,000 GBM paths with antithetic variance reduction (halves variance)','95% confidence interval shown — measures simulation uncertainty','Convergence: standard error ∝ 1/√N — doubling paths halves error','Best for path-dependent options — barrier, Asian, lookback']},
-      ].map(m=>(
-        <div key={m.label} style={{padding:'16px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${m.color}`}}>
-          <div style={{fontFamily:MONO,fontSize:9,color:m.color,letterSpacing:2,marginBottom:4}}>{m.label}</div>
-          <div style={{fontFamily:MONO,fontSize:9,color:D.t3,marginBottom:10,lineHeight:1.5}}>{m.ref}</div>
-          <div style={{fontFamily:MONO,fontSize:11,color:D.amber,marginBottom:10,padding:'6px 10px',background:`${D.amber}08`,border:`1px solid ${D.amber}20`}}>{m.formula}</div>
-          <ul style={{margin:0,paddingLeft:16}}>
-            {m.points.map(p=><li key={p} style={{fontFamily:MONO,fontSize:10,color:D.t2,marginBottom:4,lineHeight:1.6}}>{p}</li>)}
-          </ul>
+      </Section>
+
+      {/* ── PRICING MODELS ── */}
+      <Section color={D.mBS} label="03 · PRICING MODELS">
+        {[
+          {color:D.mBS,label:'BLACK-SCHOLES-MERTON (1973)',
+            ref:'Black, F. & Scholes, M. (1973). The Pricing of Options and Corporate Liabilities. Journal of Political Economy. Nobel Prize 1997.',
+            formula:'C = S·e^(−qT)·N(d₁) − K·e^(−rT)·N(d₂)',
+            points:['Closed-form analytical solution — exact for European-style options on dividend-paying stocks','Assumes constant volatility, log-normal returns, continuous frictionless trading','All five Greeks (Δ Γ ν Θ ρ) are derived analytically from the same formula','Key limitation: one flat σ for all strikes and expiries — the observed vol skew proves this wrong']},
+          {color:D.mBinom,label:'COX-ROSS-RUBINSTEIN BINOMIAL TREE (1979)',
+            ref:'Cox, J., Ross, S., Rubinstein, M. (1979). Option Pricing: A Simplified Approach. Journal of Financial Economics.',
+            formula:'u = e^(σ√Δt),  d = 1/u,  p* = (e^((r−q)Δt) − d) / (u − d)',
+            points:['Discrete recombining lattice with 150 time steps in this implementation','At each node, American early exercise is checked — value = max(intrinsic, continuation)','Converges to Black-Scholes price as steps → ∞ for European options','Early Exercise Premium (EEP) = Binomial − BS when positive; meaningful for deep ITM puts or high-dividend calls']},
+          {color:D.mMC,label:'MONTE CARLO SIMULATION (Boyle 1977)',
+            ref:'Boyle, P. (1977). Options: A Monte Carlo Approach. Journal of Financial Economics.',
+            formula:'S(T) = S₀ · exp((r − q − σ²/2)T + σ√T · Z),  Z ~ N(0,1)',
+            points:['20,000 Geometric Brownian Motion paths with antithetic variates (halves variance at zero cost)','95% confidence interval and standard error shown — direct measure of simulation uncertainty','Convergence rate: std error ∝ 1/√N — 4× paths halves the error band','Natural extension to path-dependent payoffs: barrier, Asian (average price), lookback options']},
+        ].map(m=>(
+          <div key={m.label} style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${m.color}`,marginBottom:8}}>
+            <div style={{fontFamily:MONO,fontSize:9,color:m.color,letterSpacing:2,marginBottom:4}}>{m.label}</div>
+            <div style={{fontFamily:MONO,fontSize:8,color:D.t4,marginBottom:10,lineHeight:1.6}}>{m.ref}</div>
+            <div style={{fontFamily:MONO,fontSize:10,color:D.amber,marginBottom:10,padding:'6px 10px',background:`${D.amber}08`,border:`1px solid ${D.amber}20`}}>{m.formula}</div>
+            <ul style={{margin:0,paddingLeft:16}}>
+              {m.points.map(p=><li key={p} style={{fontFamily:MONO,fontSize:9,color:D.t2,marginBottom:5,lineHeight:1.7}}>{p}</li>)}
+            </ul>
+          </div>
+        ))}
+      </Section>
+
+      {/* ── THE GREEKS ── */}
+      <Section color={D.cyan} label="04 · THE GREEKS">
+        <div style={{fontFamily:MONO,fontSize:9,color:D.t3,marginBottom:12,lineHeight:1.8}}>
+          Greeks measure sensitivity of an option's price to changes in inputs. All values are computed analytically from Black-Scholes — exact, not approximated. They are recomputed instantly as you move any slider.
         </div>
-      ))}
-      {/* Stack */}
-      <div style={{padding:'16px 18px',background:D.s2,border:`1px solid ${D.b1}`}}>
-        <div style={{fontFamily:MONO,fontSize:9,color:D.t3,letterSpacing:2,marginBottom:10}}>TECHNICAL STACK</div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8}}>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(2,1fr)',gap:6}}>
           {[
-            ['Python Engine','Black-Scholes · Binomial CRR · Monte Carlo · Newton-Raphson IV solver · 14/14 tests passing'],
-            ['FastAPI Backend','Live market data via yfinance · Options chain · IV surface · α edge analysis'],
-            ['React Frontend','Client-side BS engine · Three.js vol surface · Recharts · Deployed on Vercel'],
-          ].map(([k,v])=>(
-            <div key={k} style={{padding:'10px 14px',background:D.s3}}>
-              <div style={{fontFamily:MONO,fontSize:9,color:D.cyan,marginBottom:4}}>{k}</div>
-              <div style={{fontFamily:MONO,fontSize:9,color:D.t3,lineHeight:1.7}}>{v}</div>
+            {g:'Δ DELTA',c:D.cyan,   formula:'∂C/∂S',  range:'0 to 1 (call) · −1 to 0 (put)',
+              explain:'How much the option price changes for a $1 move in the stock. Delta ≈ probability the option expires ITM (risk-neutral). ATM options ≈ 0.50. Deep ITM → 1.0. Deep OTM → 0.'},
+            {g:'Γ GAMMA',c:D.green,  formula:'∂²C/∂S²',range:'Always positive · peaks ATM',
+              explain:'Rate of change of Delta. Highest near expiry for ATM options — the option becomes most sensitive to stock moves. Gamma risk is the core risk for option sellers.'},
+            {g:'ν VEGA', c:D.orange, formula:'∂C/∂σ',  range:'Always positive (long options)',
+              explain:'Price change per 1% increase in implied volatility. Long options always benefit from rising vol. Quoted per 100 vol points in practice. Highest for ATM long-dated options.'},
+            {g:'Θ THETA',c:D.red,    formula:'∂C/∂t',  range:'Usually negative (long options)',
+              explain:'Time decay — how much the option loses per calendar day as expiry approaches. Shown per day. Theta and Gamma are a natural trade-off: high Gamma means fast Theta bleed.'},
+            {g:'ρ RHO',  c:D.purple, formula:'∂C/∂r',  range:'Positive (call) · Negative (put)',
+              explain:'Price sensitivity to interest rates. Rho matters most for long-dated options and when rate moves are large. Less relevant for short-dated contracts and near-zero rate environments.'},
+            {g:'N(d₂)', c:D.amber,  formula:'Φ(d₂)',   range:'0 to 1',
+              explain:'Risk-neutral probability the option expires in-the-money. Not the same as the real-world probability — it uses the risk-free rate as the drift, not the expected stock return.'},
+          ].map(({g,c,formula,range,explain})=>(
+            <div key={g} style={{padding:'12px 14px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`2px solid ${c}`}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+                <span style={{fontFamily:MONO,fontSize:10,color:c,fontWeight:600}}>{g}</span>
+                <span style={{fontFamily:MONO,fontSize:9,color:D.amber,background:`${D.amber}10`,padding:'2px 7px'}}>{formula}</span>
+              </div>
+              <div style={{fontFamily:MONO,fontSize:8,color:D.t4,marginBottom:5,letterSpacing:0.5}}>{range}</div>
+              <div style={{fontFamily:MONO,fontSize:9,color:D.t3,lineHeight:1.7}}>{explain}</div>
             </div>
           ))}
         </div>
-      </div>
+      </Section>
+
+      {/* ── VOLATILITY ── */}
+      <Section color={D.orange} label="05 · VOLATILITY & THE SMILE">
+        <div style={{display:'flex',flexDirection:'column',gap:8}}>
+          <div style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${D.orange}`}}>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.orange,letterSpacing:2,marginBottom:8}}>IMPLIED VOLATILITY (IV)</div>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.t2,lineHeight:1.9}}>
+              IV is the market's forecast of future volatility — it is not observed directly but <em>solved for</em> by inverting the Black-Scholes formula given the market option price. This engine uses a Newton-Raphson solver seeded with the Brenner-Subrahmanyam approximation, converging in typically 3–5 iterations to 10⁻¹¹ precision.
+            </div>
+          </div>
+          <div style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${D.orange}`}}>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.orange,letterSpacing:2,marginBottom:8}}>THE VOL SMILE & SKEW</div>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.t2,lineHeight:1.9}}>
+              Black-Scholes assumes one constant σ for all strikes. Real markets show a <strong style={{color:D.orange}}>skew</strong>: OTM puts trade at higher IV than OTM calls. This reflects crash risk asymmetry — institutions pay a premium for downside protection. The 3D surface tab shows this across all expiries simultaneously.
+            </div>
+          </div>
+          <div style={{padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`,borderLeft:`3px solid ${D.orange}`}}>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.orange,letterSpacing:2,marginBottom:8}}>TERM STRUCTURE</div>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.t2,lineHeight:1.9}}>
+              Short-dated IV ≠ long-dated IV. Near-term vol rises around earnings or events (event vol). Long-dated vol tends to mean-revert toward a long-run average. The vol surface captures both dimensions: strike (skew) and time (term structure). Practitioners use Heston or SABR stochastic-vol models to fit this surface exactly.
+            </div>
+          </div>
+        </div>
+      </Section>
+
+      {/* ── LIMITATIONS & ROADMAP ── */}
+      <Section color={D.red} label="06 · LIMITATIONS & ROADMAP">
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+          <div style={{padding:'14px 18px',background:`${D.red}08`,border:`1px solid ${D.red}28`,borderLeft:`3px solid ${D.red}`}}>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.red,letterSpacing:2,marginBottom:10}}>CURRENT LIMITATIONS</div>
+            <ul style={{margin:0,paddingLeft:16}}>
+              {[
+                'Yahoo Finance data is delayed ~15 min and subject to rate limits',
+                'Black-Scholes assumes constant vol — the skew shows this is wrong',
+                'No path-dependent payoffs (barrier, Asian, lookback) in live chain',
+                'IV solver returns null for deep OTM / very short-dated options where Newton-Raphson diverges',
+                'No real-time streaming — prices update on page load or manual refresh',
+                'US equities only — no FX, rates, or commodity options',
+              ].map(p=><li key={p} style={{fontFamily:MONO,fontSize:9,color:D.t2,marginBottom:5,lineHeight:1.7}}>{p}</li>)}
+            </ul>
+          </div>
+          <div style={{padding:'14px 18px',background:`${D.green}08`,border:`1px solid ${D.green}28`,borderLeft:`3px solid ${D.green}`}}>
+            <div style={{fontFamily:MONO,fontSize:9,color:D.green,letterSpacing:2,marginBottom:10}}>ROADMAP</div>
+            <ul style={{margin:0,paddingLeft:16}}>
+              {[
+                'Heston stochastic-vol model to fit the full IV surface',
+                'SABR model for smile interpolation and extrapolation',
+                'Bjerksund-Stensland closed-form American option approximation',
+                'Portfolio Greeks aggregation across multiple contracts',
+                'WebSocket streaming for real-time price updates',
+                'Earnings IV term structure spike detection',
+              ].map(p=><li key={p} style={{fontFamily:MONO,fontSize:9,color:D.t2,marginBottom:5,lineHeight:1.7}}>{p}</li>)}
+            </ul>
+          </div>
+        </div>
+        {/* Validation */}
+        <div style={{marginTop:8,padding:'14px 18px',background:`${D.green}0c`,border:`1px solid ${D.green}28`,borderLeft:`3px solid ${D.green}`}}>
+          <div style={{fontFamily:MONO,fontSize:9,color:D.green,letterSpacing:2,marginBottom:10}}>✓ VALIDATED RESULTS</div>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8}}>
+            {[
+              ['Hull Example 19.1','Reproduced to 4 decimal places — S=$42, K=$40, T=0.5yr, r=10%, σ=20%'],
+              ['Put-Call Parity','Parity error: 3.55×10⁻¹⁵ — essentially machine precision'],
+              ['IV Round-Trip','Solve IV from BS price, reprice — error: 1.13×10⁻¹¹'],
+              ['Binomial Convergence','150-step CRR converges to BS within 0.01% for European options'],
+            ].map(([k,v])=>(
+              <div key={k} style={{padding:'10px 14px',background:D.s2}}>
+                <div style={{fontFamily:MONO,fontSize:9,color:D.green,marginBottom:3}}>{k}</div>
+                <div style={{fontFamily:MONO,fontSize:9,color:D.t2,lineHeight:1.6}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        {/* Stack */}
+        <div style={{marginTop:8,padding:'14px 18px',background:D.s2,border:`1px solid ${D.b1}`}}>
+          <div style={{fontFamily:MONO,fontSize:9,color:D.t3,letterSpacing:2,marginBottom:10}}>TECHNICAL STACK</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:8}}>
+            {[
+              ['Python Engine','Black-Scholes · Binomial CRR · Monte Carlo · Newton-Raphson IV solver · math.erf norm_cdf (no scipy)'],
+              ['FastAPI Backend','yfinance fast_info + custom session · 5-min cache · layered fallbacks · full error logging'],
+              ['React Frontend','Client-side BS engine · Three.js vol surface · Recharts · Deployed on Vercel'],
+            ].map(([k,v])=>(
+              <div key={k} style={{padding:'10px 14px',background:D.s3}}>
+                <div style={{fontFamily:MONO,fontSize:9,color:D.cyan,marginBottom:4}}>{k}</div>
+                <div style={{fontFamily:MONO,fontSize:9,color:D.t3,lineHeight:1.7}}>{v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </Section>
+
     </div>
   );
 }
@@ -756,6 +896,7 @@ function ModelPricer({defaultS,defaultR,defaultQ,selectedContract,onLoad}){
         {/* GREEKS */}
         {tab==='greeks'&&(
           <div style={{display:'flex',flexDirection:'column',gap:3}}>
+            <div style={{fontFamily:MONO,fontSize:8,color:D.t4,letterSpacing:1.5,marginBottom:4}}>Computed · Black-Scholes analytical</div>
             {[[0,1],[2,3],[4,5]].map((pair,pi)=>(
               <div key={pi} style={{display:'flex',gap:3}}>
                 {pair.map(gi=>{
@@ -897,6 +1038,10 @@ function ChainTable({chainData,loading,error,spot,expiry,setExpiry,onSelect}){
           <span>T={chainData.T}yr · S=${chainData.spot} · r={(chainData.r*100).toFixed(2)}%</span>
           <Badge color={D.green} size={9}>LIVE</Badge>
         </div>
+      </div>
+      <div style={{padding:'6px 18px',background:`${D.amber}06`,borderBottom:`1px solid ${D.b0}`,
+        fontFamily:MONO,fontSize:9,color:D.t3,flexShrink:0,lineHeight:1.8}}>
+        <span style={{color:D.amber,fontWeight:600}}>BS PRICE</span> and <span style={{color:D.amber,fontWeight:600}}>α EDGE</span> are <span style={{color:D.amber,fontWeight:600}}>theoretical</span> — computed from Black-Scholes using live spot &amp; IV.{'  '}<span style={{color:D.t2,fontWeight:600}}>BID / ASK / MID</span> are live market quotes.
       </div>
       <div style={{display:'flex',borderBottom:`1px solid ${D.b1}`,flexShrink:0}}>
         {['calls','puts'].map(s=>(
@@ -1096,6 +1241,23 @@ export default function App(){
 
       <TopBar ticker={ticker} onLoad={t=>{setTicker(t);setTab('chain');}} apiLive={apiLive} time={time}/>
       <QuoteStrip q={quote} loading={qLoad} onRetry={t=>{setTicker(t);setTab('chain');}}/>
+
+      {/* Data Status Bar */}
+      <div style={{display:'flex',alignItems:'center',gap:6,padding:'5px 18px',
+        background:D.s1,borderBottom:`1px solid ${D.b0}`,flexShrink:0,flexWrap:'wrap'}}>
+        <span style={{fontFamily:MONO,fontSize:7,color:D.t4,letterSpacing:2,marginRight:4}}>DATA</span>
+        {[
+          {dot:'🟢',label:'LIVE',desc:'Market prices, IV & chain from Yahoo Finance'},
+          {dot:'🟡',label:'THEORETICAL',desc:'BS / Binomial / Monte Carlo model prices'},
+          {dot:'⚪',label:'REQUIRES SUBSCRIPTION',desc:'Level II order book · real-time tick data'},
+        ].map(({dot,label,desc})=>(
+          <div key={label} title={desc} style={{display:'flex',alignItems:'center',gap:4,padding:'3px 9px',
+            background:D.s2,border:`1px solid ${D.b1}`,cursor:'default'}}>
+            <span style={{fontSize:8}}>{dot}</span>
+            <span style={{fontFamily:MONO,fontSize:7,color:D.t3,letterSpacing:1}}>{label}</span>
+          </div>
+        ))}
+      </div>
 
       <div style={{flex:1,minHeight:0,display:'flex',overflow:'hidden'}}>
         {/* LEFT — always-visible model pricer */}
