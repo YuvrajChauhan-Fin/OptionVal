@@ -257,7 +257,7 @@ function TopBar({ticker,onLoad,apiLive,time}){
         <span style={{fontFamily:MONO,fontSize:9,color:D.t3,padding:'0 12px',letterSpacing:2}}>TICKER</span>
         <input value={q} onChange={e=>{setQ(e.target.value);setOpen(true);}}
           onKeyDown={e=>e.key==='Enter'&&go(q)} onFocus={()=>setOpen(true)} onBlur={()=>setTimeout(()=>setOpen(false),180)}
-          placeholder="AAPL · TSLA · RELIANCE.NS"
+          placeholder="AAPL · TSLA · NVDA · MSFT"
           style={{fontFamily:DISPLAY,fontSize:15,color:D.t0,background:D.s2,
             border:`1px solid ${D.b2}`,borderRight:'none',padding:'9px 14px',width:240,letterSpacing:1.5}}/>
         <button onClick={()=>go(q)} style={{fontFamily:MONO,fontSize:9,padding:'9px 22px',cursor:'pointer',
@@ -281,7 +281,10 @@ function TopBar({ticker,onLoad,apiLive,time}){
           </div>
         )}
       </div>
-      <span style={{fontFamily:MONO,fontSize:9,color:D.t3}}>{time}</span>
+      <div style={{display:'flex',flexDirection:'column',alignItems:'flex-start',gap:2}}>
+        <span style={{fontFamily:MONO,fontSize:9,color:D.t3}}>{time}</span>
+        <span style={{fontFamily:MONO,fontSize:8,color:D.t4,letterSpacing:.5}}>🇺🇸 US stocks only — international markets coming soon</span>
+      </div>
     </div>
   );
 }
@@ -841,7 +844,7 @@ function ChainTable({chainData,loading,error,spot,expiry,setExpiry,onSelect}){
     <div style={{display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',height:300,gap:14}}>
       <div style={{fontFamily:MONO,fontSize:32,color:D.t4,opacity:.5}}>⬡</div>
       <div style={{fontFamily:MONO,fontSize:11,color:D.t3,letterSpacing:2}}>LOAD A TICKER TO SEE LIVE OPTIONS</div>
-      <div style={{fontFamily:MONO,fontSize:10,color:D.t4}}>Try: AAPL · TSLA · NVDA · MSFT · RELIANCE.NS</div>
+      <div style={{fontFamily:MONO,fontSize:10,color:D.t4}}>Try: AAPL · TSLA · NVDA · MSFT · SPY</div>
     </div>
   );
   const contracts=(side==='calls'?chainData.calls:chainData.puts)||[];
